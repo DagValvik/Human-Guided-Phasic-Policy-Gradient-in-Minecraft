@@ -20,7 +20,7 @@ from azure.storage.blob import BlobServiceClient
 # Set global variables
 VERSION = "1.0"
 STORAGE_ACCOUNT_NAME = "rstrainingdata"
-STORAGE_ACCOUNT_KEY = "SQUzMlTxJOkaaBddPYOAxPiy7n7y9lGCIOw1ZSGIVQwfCQpbnbCv2RQcl1TmzGDbMogdBPfHF5l9+AStcbYWHA=="
+STORAGE_ACCOUNT_KEY = os.environ.get("STORAGE_ACCOUNT_KEY")
 CONTAINER_NAME = "data"
 FRAME_RATE = 15
 SLEEP_TIME = 1.0 / FRAME_RATE
@@ -130,7 +130,8 @@ def draw_cursor(
 
     Args:
         frame (np.ndarray): The frame
-        mouse_info (dict): A dictionary containing information about the mouse position and whether the mouse is inside the RuneLite client window
+        mouse_info (dict): A dictionary containing information about the mouse
+        position and whether the mouse is inside the RuneLite client window
     """
 
     # Get the mouse position
@@ -223,9 +224,10 @@ def create_run_id_for(player: str) -> str:
         player (str): The player name
 
     Returns:
-        str: The run ID (e.g. <player>-<session-id(12 characters)>-<date>-<time>)
+        str: The run ID <player>-<session-id(12 characters)>-<date>-<time>
     """
-    return f"{player}-{uuid.uuid4().hex[:12]}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+    date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+    return f"{player}-{uuid.uuid4().hex[:12]}-{date}"
 
 
 async def main():
