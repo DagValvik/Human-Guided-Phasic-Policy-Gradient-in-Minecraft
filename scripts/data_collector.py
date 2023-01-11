@@ -20,9 +20,9 @@ from azure.storage.blob import BlobServiceClient
 # Set global variables
 VERSION = "1.0"
 STORAGE_ACCOUNT_NAME = "rstrainingdata"
-STORAGE_ACCOUNT_KEY = os.environ.get("STORAGE_ACCOUNT_KEY")
+STORAGE_ACCOUNT_KEY = "SQUzMlTxJOkaaBddPYOAxPiy7n7y9lGCIOw1ZSGIVQwfCQpbnbCv2RQcl1TmzGDbMogdBPfHF5l9+AStcbYWHA=="
 CONTAINER_NAME = "data"
-FRAME_RATE = 15
+FRAME_RATE = 20
 SLEEP_TIME = 1.0 / FRAME_RATE
 
 
@@ -47,28 +47,6 @@ def get_runelite_window() -> pyautogui.Window or None:
     return None
 
 
-def get_mouse_data(window) -> tuple:
-    """Get the mouse position relative to the RuneLite client window
-
-    Returns:
-        tuple: The mouse position
-    """
-    # Get the mouse position
-    mouse_x, mouse_y = mouse.get_position()
-    # Check if the mouse is inside the RuneLite client window
-    if (
-        window.left <= mouse_x <= window.right
-        and window.top <= mouse_y <= window.bottom
-    ):
-        mouse_inside = True
-    else:
-        mouse_inside = False
-    # Calculate the mouse position relative to the RuneLite client window
-    mouse_x -= window.left
-    mouse_y -= window.top
-    return (mouse_x, mouse_y), mouse_inside
-
-
 def get_keyboard_input() -> list:
     """Get the keyboard input
 
@@ -85,17 +63,28 @@ def get_keyboard_input() -> list:
     return keys
 
 
-def get_mouse_input(mouse_data: tuple) -> dict:
+def get_mouse_info(window) -> dict:
     """Get the mouse input
 
     Returns:
         dict: The mouse input
     """
-    # Get the mouse position and check if the mouse is inside the window
-    mouse_pos, mouse_inside = mouse_data
+    # Get the mouse position
+    mouse_x, mouse_y = mouse.get_position()
+    # Check if the mouse is inside the RuneLite client window
+    if (
+        window.left <= mouse_x <= window.right
+        and window.top <= mouse_y <= window.bottom
+    ):
+        mouse_inside = True
+    else:
+        mouse_inside = False
+    # Calculate the mouse position relative to the RuneLite client window
+    mouse_x -= window.left
+    mouse_y -= window.top
     # Get the mouse input
     mouse_data = {
-        "mouse_pos": mouse_pos,
+        "mouse_pos": (mouse_x, mouse_y),
         "left_click": mouse.is_pressed("left"),
         "right_click": mouse.is_pressed("right"),
         "middle_click": mouse.is_pressed("middle"),
@@ -111,10 +100,15 @@ def get_frame(window, screenshot) -> np.ndarray:
         np.ndarray: The frame
     """
     # get x, y, width, height of the window in case it has been moved
-    x, y, width, height = window.left, window.top, window.width, window.height
+    x, y = window.left, window.top
     # Capture a frame of the window
     frame = screenshot.grab(
-        {"left": x, "top": y, "width": width, "height": height}
+        {
+            "left": x + 5,
+            "top": y + 28,
+            "width": 765,
+            "height": 503,
+        }
     )
     # Convert the frame to a numpy array
     frame = np.array(frame)
@@ -230,94 +224,93 @@ def create_run_id_for(player: str) -> str:
     return f"{player}-{uuid.uuid4().hex[:12]}-{date}"
 
 
-async def main():
-    """The main function"""
-
-    # Check if the RuneLite client window was found
-    runelite_window = get_runelite_window()
-    if runelite_window is None:
-        print("Could not find RuneLite client window")
-        sys.exit()
-
-    # Get the player name
-    player = get_player(runelite_window.title)
-    # Create a unique run ID for the player
-    run_uuid = create_run_id_for(player)
-    # Create a directory for the run
-    run_directory = os.path.join(CONTAINER_NAME, run_uuid)
-
-    if SAVE_LOCALLY:
-        create_run_dir(run_directory)
-
-    count = 0
-    action_data = []
-
-    # Start the timer
-    start_time = time.time()
-
-    # Get the cursor image from the assets folder
-    cursor = cv2.imread("assets/cursor-rs3-gold.png", cv2.IMREAD_UNCHANGED)
-
-    screenshot = mss.mss()
-
-    # Create a new instance of the BlobServiceClient class
-    blob_service = BlobServiceClient(
-        f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
-        credential=STORAGE_ACCOUNT_KEY,
-    )
-
-    # Create the container if it doesn't already exist
-    if not blob_service.get_container_client(CONTAINER_NAME).exists():
-        blob_service.create_container(CONTAINER_NAME)
-
-    # Start the main loop
-    while True:
+async def collect_data(window, stop_event: asyncio.Event):
+    """Collect the data"""
+    global count
+    while not stop_event.is_set():
         # Start frame timer
         frame_time = time.perf_counter()
-        # Get the mouse input
-        mouse_data = get_mouse_data(runelite_window)
-        mouse_info = get_mouse_input(mouse_data)
+        # Collect data
+        mouse_data = get_mouse_info(window)
+        frame = get_frame(window, screen_util)
+        # Do some processing on the data
+        frame = draw_cursor(frame, mouse_data, cursor)
 
-        # Get a frame of the RuneLite client window
-        frame = get_frame(runelite_window, screenshot)
-
-        # Draw the cursor on the frame
-        frame = draw_cursor(frame, mouse_info, cursor)
-
-        # Save the frame
+        # Save the data
+        action_data.append(mouse_data)
         if SAVE_LOCALLY:
             save_frame(frame, run_directory, count)
         else:
             # Save the frame to Azure Blob Storage
             await save_blob(frame, run_uuid, count, blob_service)
 
-        # Get the action data
-        action_data.append(
-            {
-                "time": time.time() - start_time,
-                "mouse_pos": mouse_info["mouse_pos"],
-                "left_click": mouse_info["left_click"],
-                "right_click": mouse_info["right_click"],
-                "middle_click": mouse_info["middle_click"],
-                "inside": mouse_info["inside"],
-            }
-        )
-
         # Increment the frame count
         count += 1
 
-        # calculate the fps and print it in place of the previous fps
+        # calculate the fps and display it
         fps = 1 / (time.perf_counter() - frame_time)
         print(f"FPS: {fps:.2f}", end="\r")
 
-        # Calculate the elapsed time since the last frame
-        elapsed_time = time.perf_counter() - frame_time
-        time_to_sleep = max(0, SLEEP_TIME - elapsed_time)
-        time.sleep(time_to_sleep)
+        # Wait for remaining time to reach the desired frame rate
+        await asyncio.sleep(
+            max(0, SLEEP_TIME - (time.perf_counter() - frame_time))
+        )
 
+
+async def main():
+    """The main function"""
+
+    # Check if the RuneLite client window exists
+    runelite_window = get_runelite_window()
+    if runelite_window is None:
+        print("Could not find RuneLite client window")
+        sys.exit()
+
+    # Initialize global variables
+    global action_data
+    global count
+    global start_time
+    global blob_service
+    global run_directory
+    global run_uuid
+    global screen_util
+    global cursor
+    action_data = []
+    count = 0
+    start_time = time.time()
+    player = get_player(runelite_window.title)
+    run_uuid = create_run_id_for(player)
+    run_directory = os.path.join(CONTAINER_NAME, run_uuid)
+    cursor = cv2.imread(
+        "scripts/assets/cursor-rs3-gold.png", cv2.IMREAD_UNCHANGED
+    )
+    screen_util = mss.mss()
+
+    if SAVE_LOCALLY:
+        create_run_dir(run_directory)
+    else:
+        # Create a new instance of the BlobServiceClient class
+        blob_service = BlobServiceClient(
+            f"https://{STORAGE_ACCOUNT_NAME}.blob.core.windows.net",
+            credential=STORAGE_ACCOUNT_KEY,
+        )
+
+        # Create the container if it doesn't already exist
+        if not blob_service.get_container_client(CONTAINER_NAME).exists():
+            blob_service.create_container(CONTAINER_NAME)
+
+    stop_event = asyncio.Event()
+    collection_task = asyncio.create_task(
+        collect_data(runelite_window, stop_event)
+    )
+
+    while not stop_event.is_set():
         # If the user presses "Shift + Esc", exit the program
         if keyboard.is_pressed("shift+esc"):
-            break
+            stop_event.set()
+        await asyncio.sleep(0.1)
+
+    await collection_task
 
     # Save the data
     if SAVE_LOCALLY:
@@ -326,7 +319,7 @@ async def main():
         save_json_azure(action_data, run_uuid, blob_service)
     print("Done")
     # Close the screenshot object
-    screenshot.close()
+    screen_util.close()
     # Exit the program
     sys.exit()
 
