@@ -4,3 +4,8 @@ pytest
 mypy
 docformatter
 pre-commit
+torch
+gym
+gym3
+attrs
+opencv-python
