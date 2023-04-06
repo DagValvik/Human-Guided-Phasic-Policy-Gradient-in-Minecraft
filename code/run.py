@@ -2,13 +2,14 @@
 # This is the entry point for your submission.
 # Changing this file will probably fail your submissions.
 
-import train
+import os
+
 import test_BuildVillageHouse
 import test_CreateVillageAnimalPen
 import test_FindCave
 import test_MakeWaterfall
 
-import os
+import train
 
 # By default, only do testing
 EVALUATION_STAGE = os.getenv('EVALUATION_STAGE', 'testing')

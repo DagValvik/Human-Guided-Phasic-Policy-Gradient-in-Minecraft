@@ -9,6 +9,14 @@ __pycache__/
 # C extensions
 *.so
 
+# Data
+*.jsonl
+*.mp4
+
+# Models
+*.model
+*.weights
+
 # Distribution / packaging
 .Python
 build/

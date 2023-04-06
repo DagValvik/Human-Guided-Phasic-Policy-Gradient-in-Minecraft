@@ -1,20 +1,26 @@
-name: minerl
+name: minerl2
 channels:
+  - nvidia
+  - pytorch
   - conda-forge
   - defaults
 dependencies:
-  - python=3.7
+  - python=3.9
   - pip
   - py-opencv
-  - cudatoolkit=10.2
+  - pytorch
+  - torchvision
+  - torchaudio
+  - cudatoolkit
+  - pytorch-cuda=11.8
+  - setuptools=65.0.0
   - black
-  - flake8
-  - pre-commit
-  - pytest
+  - coloredlogs
+  - matplotlib
+  - attrs
+  - stable-baselines3==1.4.0
   - pip:
       - git+https://github.com/minerllabs/minerl
-      - coloredlogs
-      - matplotlib
       - aicrowd-api
       - aicrowd-gym
-      - stable-baselines[mpi]
+      - gym3
