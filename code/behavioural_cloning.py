@@ -12,9 +12,9 @@ import gym
 import minerl
 import numpy as np
 import torch as th
-from agent import PI_HEAD_KWARGS, MineRLAgent
 from data_loader import DataLoader
 from lib.tree_util import tree_map
+from openai_vpt.agent import PI_HEAD_KWARGS, MineRLAgent
 
 # Originally this code was designed for a small dataset of ~20 demonstrations per task.
 # The settings might not be the best for the full BASALT dataset (thousands of demonstrations).

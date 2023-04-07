@@ -3,7 +3,7 @@ from argparse import ArgumentParser
 
 import aicrowd_gym
 import minerl
-from agent import MineRLAgent
+from openai_vpt.agent import MineRLAgent
 
 
 def main(model, weights, env, n_episodes=3, max_steps=int(1e9), show=False):

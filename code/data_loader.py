@@ -10,7 +10,7 @@ from multiprocessing import Event, Process, Queue
 
 import cv2
 import numpy as np
-from agent import AGENT_RESOLUTION, resize_image
+from openai_vpt.agent import AGENT_RESOLUTION, resize_image
 
 QUEUE_TIMEOUT = 10
 
