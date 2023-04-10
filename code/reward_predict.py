@@ -1,42 +1,52 @@
+import logging
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 
 
-class CustomCNN(nn.Module):
-    def __init__(self, input_channels, batchnorm=True, dropout=0.5):
-        super(CustomCNN, self).__init__()
+class RewardPredictorCore(nn.Module):
+    def __init__(self, batchnorm=True, dropout=0.5):
+        super(RewardPredictorCore, self).__init__()
         self.feature_extractor = self.create_feature_extractor(
-            input_channels, batchnorm, dropout
+            batchnorm, dropout
         )
         self.classifier = self.create_classifier()
 
-    def create_feature_extractor(self, input_channels, batchnorm, dropout):
+    def calculate_output_size(self, input_shape):
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, *input_shape)
+            dummy_output = self.feature_extractor(dummy_input)
+            return dummy_output.view(1, -1).size(1)
+
+    def create_feature_extractor(self, batchnorm, dropout):
         layers = [
-            nn.Conv2d(input_channels, 16, kernel_size=7, stride=3, padding=3),
-            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
+            nn.Conv2d(3, 32, kernel_size=7, stride=3),
+            nn.BatchNorm2d(32) if batchnorm else nn.Identity(),
+            nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout) if dropout else nn.Identity(),
-            nn.Conv2d(16, 16, kernel_size=5, stride=2, padding=2),
-            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
+            nn.Conv2d(32, 64, kernel_size=5, stride=2),
+            nn.BatchNorm2d(64) if batchnorm else nn.Identity(),
+            nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout) if dropout else nn.Identity(),
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=1),
+            nn.BatchNorm2d(128) if batchnorm else nn.Identity(),
+            nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(dropout) if dropout else nn.Identity(),
-            nn.Conv2d(16, 16, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
+            nn.Conv2d(128, 256, kernel_size=3, stride=1),
+            nn.BatchNorm2d(256) if batchnorm else nn.Identity(),
+            nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
         ]
         return nn.Sequential(*layers)
 
     def create_classifier(self):
+        input_shape = (3, 360, 640)
+        output_size = self.calculate_output_size(input_shape)
         layers = [
-            nn.Linear(16 * 45 * 80, 64),
+            nn.Linear(output_size, 512),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 1),
+            nn.Linear(512, 1),
         ]
         return nn.Sequential(*layers)
 
@@ -45,58 +55,65 @@ class CustomCNN(nn.Module):
         x = self.feature_extractor(x)
         x = x.view(x.size(0), -1)
         x = self.classifier(x)
-        return x.squeeze()
-
-
-# # For single RGB image
-# net_single = CustomCNN(input_channels=3)
-# # For stack of 5 RGB images
-# net_stacked = CustomCNN(input_channels=3*5)
+        return x.view(-1)
 
 
 class RewardPredictorNetwork(nn.Module):
-    def __init__(self, input_channels, dropout, batchnorm, lr):
+    """
+    Args:
+        nn (_type_): _description_
+    """
+
+    def __init__(self, batchnorm=True, dropout=0.5, pref_queue=None):
         super(RewardPredictorNetwork, self).__init__()
-        self.core_network = CustomCNN(input_channels=input_channels, dropout=dropout, batchnorm=batchnorm)
-        self.loss_fn = nn.CrossEntropyLoss()
-        self.optimizer = optim.Adam(self.core_network.parameters(), lr=lr)
-
-    def forward(self, s1, s2, pref, training):
-        self.core_network.train(training)
-
-        _r1 = self.core_network(s1)
-        _r2 = self.core_network(s2)
-
-        r1 = _r1.view(s1.size(0), s1.size(1))
-        r2 = _r2.view(s2.size(0), s2.size(1))
-
-        rs1 = torch.sum(r1, dim=1)
-        rs2 = torch.sum(r2, dim=1)
-
-        rs = torch.stack([rs1, rs2], dim=1)
-        pred = nn.functional.softmax(rs, dim=1)
-
-        preds_correct = torch.eq(
-            torch.argmax(pref, dim=1), torch.argmax(pred, dim=1)
+        self.device = torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
         )
-        accuracy = torch.mean(preds_correct.float())
+        self.core = RewardPredictorCore(batchnorm, dropout).to(self.device)
+        self.optimizer = optim.Adam(self.core.parameters(), lr=0.001)
+        self.pref_queue = pref_queue
 
-        loss = self.loss_fn(rs, torch.argmax(pref, dim=1))
+    def reward(self, obs):
+        obs = obs.to(self.device)
+        r = self.core(obs)
+        return r
 
-        return r1, r2, rs1, rs2, pred, accuracy, loss
-
-    def train_step(self, s1, s2, pref, training):
+    def train_step(self, s1, s2, pref):
+        # Each segment can be many frames, calculate the reward for each frame
+        # and sum the rewards
+        s1 = s1.to(self.device)  # Move s1 to the GPU
+        s2 = s2.to(self.device)  # Move s2 to the GPU
+        r1 = self.reward(s1)
+        r2 = self.reward(s2)
+        r2sum = r2.sum()
+        r1sum = r1.sum()
+        # Calculate the probability that segment 1 is preferred over segment 2
+        # by comparing the sum of rewards
+        p1 = torch.exp(r1sum) / (torch.exp(r1sum) + torch.exp(r2sum))
+        p2 = torch.exp(r2sum) / (torch.exp(r1sum) + torch.exp(r2sum))
+        # Calculate the loss
+        loss = -(
+            torch.tensor(pref[0]) * torch.log(p1)
+            + torch.tensor(pref[1]) * torch.log(p2)
+        )
+        # Backpropagate
         self.optimizer.zero_grad()
-        r1, r2, rs1, rs2, pred, accuracy, loss = self.forward(
-            s1, s2, pref, training
-        )
         loss.backward()
         self.optimizer.step()
-        return r1, r2, rs1, rs2, pred, accuracy, loss
+        return loss.item()
 
+    def train(self):
+        # Get random segment pairs from the preference queue
+        # and train the network on them
+        while True:
+            # Get a random segment pair from the preference queue if there is any
+            s1, s2, pref = self.pref_queue.get()
+            loss = self.train_step(s1, s2, pref)
+            logging.debug("Trained on preference %s", pref)
+            logging.debug("Loss: %f", loss)
 
-# # For a single RGB image
-# reward_predictor_single = RewardPredictorNetwork(input_channels=3, dropout=0.5, batchnorm=True, lr=0.001)
+    def save(self, path):
+        torch.save(self.core.state_dict(), path)
 
-# # For a stack of 5 RGB images
-# reward_predictor_stacked = RewardPredictorNetwork(input_channels=3*5, dropout=0.5, batchnorm=True, lr=0.001)
+    def load(self, path):
+        self.core.load_state_dict(torch.load(path))
