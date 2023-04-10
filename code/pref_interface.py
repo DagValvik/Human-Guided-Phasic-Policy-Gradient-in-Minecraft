@@ -17,13 +17,14 @@ from utils import VideoRenderer
 
 
 class PrefInterface:
-
     def __init__(self, synthetic_prefs, max_segs, log_dir):
         self.vid_q = Queue()
         if not synthetic_prefs:
-            self.renderer = VideoRenderer(vid_queue=self.vid_q,
-                                          mode=VideoRenderer.restart_on_get_mode,
-                                          zoom=4)
+            self.renderer = VideoRenderer(
+                vid_queue=self.vid_q,
+                mode=VideoRenderer.restart_on_get_mode,
+                zoom=4,
+            )
         else:
             self.renderer = None
         self.synthetic_prefs = synthetic_prefs
@@ -49,16 +50,19 @@ class PrefInterface:
                 try:
                     seg_pair = self.sample_seg_pair()
                 except IndexError:
-                    print("Preference interface ran out of untested segments;"
-                          "waiting...")
+                    print(
+                        "Preference interface ran out of untested segments;"
+                        "waiting..."
+                    )
                     # If we've tested all possible pairs of segments so far,
                     # we'll have to wait for more segments
                     time.sleep(1.0)
                     self.recv_segments(seg_pipe)
             s1, s2 = seg_pair
 
-            logging.debug("Querying preference for segments %s and %s",
-                          s1.hash, s2.hash)
+            logging.debug(
+                "Querying preference for segments %s and %s", s1.hash, s2.hash
+            )
 
             if not self.synthetic_prefs:
                 pref = self.ask_user(s1, s2)
@@ -97,9 +101,9 @@ class PrefInterface:
                 self.segments[self.seg_idx] = segment
                 self.seg_idx = (self.seg_idx + 1) % self.max_segs
             n_recvd += 1
-        easy_tf_log.tflog('segment_idx', self.seg_idx)
-        easy_tf_log.tflog('n_segments_rcvd', n_recvd)
-        easy_tf_log.tflog('n_segments', len(self.segments))
+        easy_tf_log.tflog("segment_idx", self.seg_idx)
+        easy_tf_log.tflog("n_segments_rcvd", n_recvd)
+        easy_tf_log.tflog("n_segments", len(self.segments))
 
     def sample_seg_pair(self):
         """
@@ -110,8 +114,9 @@ class PrefInterface:
         possible_pairs = combinations(segment_idxs, 2)
         for i1, i2 in possible_pairs:
             s1, s2 = self.segments[i1], self.segments[i2]
-            if ((s1.hash, s2.hash) not in self.tested_pairs) and \
-               ((s2.hash, s1.hash) not in self.tested_pairs):
+            if ((s1.hash, s2.hash) not in self.tested_pairs) and (
+                (s2.hash, s1.hash) not in self.tested_pairs
+            ):
                 self.tested_pairs.add((s1.hash, s2.hash))
                 self.tested_pairs.add((s2.hash, s1.hash))
                 return s1, s2
@@ -123,9 +128,9 @@ class PrefInterface:
         for t in range(seg_len):
             border = np.zeros((84, 10), dtype=np.uint8)
             # -1 => show only the most recent frame of the 4-frame stack
-            frame = np.hstack((s1.frames[t][:, :, -1],
-                               border,
-                               s2.frames[t][:, :, -1]))
+            frame = np.hstack(
+                (s1.frames[t][:, :, -1], border, s2.frames[t][:, :, -1])
+            )
             vid.append(frame)
         n_pause_frames = 7
         for _ in range(n_pause_frames):

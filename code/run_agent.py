@@ -1,14 +1,13 @@
 import pickle
 from argparse import ArgumentParser
 
-import aicrowd_gym
+import gym
 import minerl
 from openai_vpt.agent import MineRLAgent
 
 
 def main(model, weights, env, n_episodes=3, max_steps=int(1e9), show=False):
-    # Using aicrowd_gym is important! Your submission will not work otherwise
-    env = aicrowd_gym.make(env)
+    env = gym.make(env)
     agent_parameters = pickle.load(open(model, "rb"))
     policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
     pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]

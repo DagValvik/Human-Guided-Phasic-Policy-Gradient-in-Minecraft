@@ -13,22 +13,22 @@ import minerl
 import numpy as np
 import torch as th
 from data_loader import DataLoader
-from lib.tree_util import tree_map
 from openai_vpt.agent import PI_HEAD_KWARGS, MineRLAgent
+from openai_vpt.lib.tree_util import tree_map
 
 # Originally this code was designed for a small dataset of ~20 demonstrations per task.
 # The settings might not be the best for the full BASALT dataset (thousands of demonstrations).
 # Use this flag to switch between the two settings
 USING_FULL_DATASET = True
 
-EPOCHS = 1 if USING_FULL_DATASET else 2
+EPOCHS = 10 if USING_FULL_DATASET else 2
 # Needs to be <= number of videos
-BATCH_SIZE = 64 if USING_FULL_DATASET else 16
+BATCH_SIZE = 12 if USING_FULL_DATASET else 16
 # Ideally more than batch size to create
 # variation in datasets (otherwise, you will
 # get a bunch of consecutive samples)
 # Decrease this (and batch_size) if you run out of memory
-N_WORKERS = 100 if USING_FULL_DATASET else 20
+N_WORKERS = 15 if USING_FULL_DATASET else 20
 DEVICE = "cuda"
 
 LOSS_REPORT_RATE = 100
@@ -53,12 +53,14 @@ def load_model_parameters(path_to_model_file):
     return policy_kwargs, pi_head_kwargs
 
 
-def behavioural_cloning_train(data_dir, in_model, in_weights, out_weights):
+def behavioural_cloning_train(
+    data_dir, in_model, in_weights, out_weights, env_name
+):
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
 
     # To create model with the right environment.
     # All basalt environments have the same settings, so any of them works here
-    env = gym.make("MineRLBasaltFindCave-v0")
+    env = gym.make(env_name)
     agent = MineRLAgent(
         env,
         device=DEVICE,
@@ -221,8 +223,18 @@ if __name__ == "__main__":
         type=str,
         help="Path where finetuned weights will be saved",
     )
+    parser.add_argument(
+        "--env_name",
+        type=str,
+        default="MineRLBasaltFindCave-v0",
+        help="Name of the environment to be used",
+    )
 
     args = parser.parse_args()
     behavioural_cloning_train(
-        args.data_dir, args.in_model, args.in_weights, args.out_weights
+        args.data_dir,
+        args.in_model,
+        args.in_weights,
+        args.out_weights,
+        args.env_name,
     )
