@@ -2,6 +2,7 @@ from queue import Queue
 from random import shuffle
 
 import numpy as np
+import torch
 
 
 class PreferenceInterface:
@@ -24,7 +25,7 @@ class PreferenceInterface:
         get all the segments, shuffle them, and put them back in the queue. This is not thread-safe, so we use locks.
         """
         raise NotImplementedError
-        
+
     def run(self):
         """
         Run the preference interface.
@@ -80,7 +81,7 @@ class Segment:
         if sequence_id is not None:
             self.sequence_id = sequence_id
         else:
-            self.hash = hash(np.array(self.frames).tostring())
+            self.hash = hash(torch.cat(self.frames).numpy().tobytes())
 
     def __len__(self):
         """

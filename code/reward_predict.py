@@ -1,9 +1,9 @@
 import logging
+from code.preference_interface import Segment
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from preference_interface import Segment
 
 
 class RewardPredictorCore(nn.Module):
@@ -80,50 +80,47 @@ class RewardPredictorNetwork(nn.Module):
         return r
 
     def train_step(self, s1: Segment, s2: Segment, pref: list):
-        """_summary_
+        # Sum the rewards for each segment
+        r1sum = sum(s1.rewards)
+        r2sum = sum(s2.rewards)
 
-        Args:
-            s1 (Segment): A segment of video frames and rewards for each frame
-            s2 (Segment): A segment of video frames and rewards for each frame
-            pref (list): A list of two floats,
-            the first is the probability that s1 is preferred over s2
-            the second is the probability that s2 is preferred over s1
-
-        Returns:
-            _type_: _description_
-        """
-        # Each segment can be many frames, calculate the reward for each frame
-        # and sum the rewards
-        s1 = s1.to(self.device)  # Move s1 to the GPU
-        s2 = s2.to(self.device)  # Move s2 to the GPU
-        r1 = self.reward(s1)
-        r2 = self.reward(s2)
-        r2sum = r2.sum()
-        r1sum = r1.sum()
         # Calculate the probability that segment 1 is preferred over segment 2
         # by comparing the sum of rewards
-        p1 = torch.exp(r1sum) / (torch.exp(r1sum) + torch.exp(r2sum))
-        p2 = torch.exp(r2sum) / (torch.exp(r1sum) + torch.exp(r2sum))
+        p1 = torch.exp(torch.tensor(r1sum, requires_grad=True)) / (
+            torch.exp(torch.tensor(r1sum, requires_grad=True))
+            + torch.exp(torch.tensor(r2sum, requires_grad=True))
+        )
+        p2 = torch.exp(torch.tensor(r2sum, requires_grad=True)) / (
+            torch.exp(torch.tensor(r1sum, requires_grad=True))
+            + torch.exp(torch.tensor(r2sum, requires_grad=True))
+        )
+
         # Calculate the loss
         loss = -(
-            torch.tensor(pref[0]) * torch.log(p1)
-            + torch.tensor(pref[1]) * torch.log(p2)
+            torch.tensor(pref[0], requires_grad=True) * torch.log(p1)
+            + torch.tensor(pref[1], requires_grad=True) * torch.log(p2)
         )
+
         # Backpropagate
         self.optimizer.zero_grad()
         loss.backward()
         self.optimizer.step()
         return loss.item()
 
-    def train(self):
-        # Get random segment pairs from the preference queue
-        # and train the network on them
+    def train(self, max_iterations=None):
+        iteration = 0
         while True:
-            # Get a random segment pair from the preference queue if there is any
+            # Get a segment pair from the preference queue if there is any
             s1, s2, pref = self.pref_queue.get()
             loss = self.train_step(s1, s2, pref)
             logging.debug("Trained on preference %s", pref)
             logging.debug("Loss: %f", loss)
+
+            # Increment the iteration counter and break if the maximum number of iterations is reached
+            if max_iterations is not None:
+                iteration += 1
+                if iteration >= max_iterations:
+                    break
 
     def save(self, path):
         torch.save(self.core.state_dict(), path)
