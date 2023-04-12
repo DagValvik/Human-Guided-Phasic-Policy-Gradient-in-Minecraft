@@ -41,7 +41,7 @@ def relpaths_to_download(relpaths, output_dir):
                 "[" + "".join(json_file.readlines()).replace("\n", ",") + "]"
             )
 
-    data_path = "/".join(relpaths[0].split("/")[:-1])
+    data_path = os.path.dirname(relpaths[0])
     non_defect = []
     for vid_name in glob.glob(os.path.join(output_dir, "*.mp4")):
         try:
@@ -49,14 +49,17 @@ def relpaths_to_download(relpaths, output_dir):
             read_json(vid_name.replace("mp4", "jsonl"))
             if vid.isOpened():
                 non_defect.append(
-                    os.path.join(data_path, vid_name.split("/")[-1])
+                    os.path.normpath(
+                        os.path.join(data_path, os.path.basename(vid_name))
+                    )
                 )
         except:
             continue
 
-    relpaths = set(relpaths)
+    relpaths = set(os.path.normpath(path) for path in relpaths)
     non_defect = set(non_defect)
     diff_to_download = relpaths.difference(non_defect)
+
     print(
         "total:",
         len(relpaths),
