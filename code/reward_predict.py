@@ -3,6 +3,7 @@ import logging
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from preference_interface import Segment
 
 
 class RewardPredictorCore(nn.Module):
@@ -78,7 +79,19 @@ class RewardPredictorNetwork(nn.Module):
         r = self.core(obs)
         return r
 
-    def train_step(self, s1, s2, pref):
+    def train_step(self, s1: Segment, s2: Segment, pref: list):
+        """_summary_
+
+        Args:
+            s1 (Segment): A segment of video frames and rewards for each frame
+            s2 (Segment): A segment of video frames and rewards for each frame
+            pref (list): A list of two floats,
+            the first is the probability that s1 is preferred over s2
+            the second is the probability that s2 is preferred over s1
+
+        Returns:
+            _type_: _description_
+        """
         # Each segment can be many frames, calculate the reward for each frame
         # and sum the rewards
         s1 = s1.to(self.device)  # Move s1 to the GPU

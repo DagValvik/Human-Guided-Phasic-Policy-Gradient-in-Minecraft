@@ -1,3 +1,5 @@
+import queue
+from code.preference_interface import Segment
 from code.reward_predict import RewardPredictorCore, RewardPredictorNetwork
 
 import torch
@@ -21,22 +23,56 @@ def test_reward_calculation():
     obs = torch.randn(1, 3, 360, 640)  # Random tensor simulating a video frame
     rewards = network.reward(obs)
     assert rewards.size() == torch.Size([1])
+    # Check if the reward is a float
+    assert isinstance(rewards.item(), float)
 
 
 # Test if the RewardPredictorNetwork can perform a single training step
 def test_train_step():
     network = RewardPredictorNetwork()
-    s1 = torch.randn(1, 3, 360, 640)
-    s2 = torch.randn(1, 3, 360, 640)
+    # Create two segments of video frames
+    s1 = Segment()
+    s2 = Segment()
+    # Add a frame to each segment
+    s1.add_frame(torch.randn(3, 360, 640), 0.0)
+    s1.finish()
+    s2.add_frame(torch.randn(3, 360, 640), 0.0)
+    s2.finish()
+    # Create a preference list
     pref = [1.0, 0.0]
+    # Perform a training step
     loss = network.train_step(s1, s2, pref)
     assert isinstance(loss, float)
+    assert loss > 0.0  # The loss should be positive
+
+
+# Test if the RewardPredictorNetwork can train on a preference queue of segment pairs
+def test_train():
+    # Create queue
+    pref_queue = queue.Queue()
+    network = RewardPredictorNetwork(pref_queue=pref_queue)
+    # Create two segments of video frames
+    s1 = Segment()
+    s2 = Segment()
+    # Add a frame to each segment
+    s1.add_frame(torch.randn(3, 360, 640), 0.0)
+    s1.finish()
+    s2.add_frame(torch.randn(3, 360, 640), 0.0)
+    s2.finish()
+
+    pref_queue.put((s1, s2, [1.0, 0.0]))
+
+    # Train on the preference queue
+    network.train(max_iterations=1)
+
+    # Check that quque is empty
+    assert pref_queue.empty()
 
 
 # Test if the RewardPredictorNetwork can save and load its parameters
 def test_save_and_load():
     network = RewardPredictorNetwork()
-    save_path = "test_weights.pth"
+    save_path = "tests/test_weights.pth"
     network.save(save_path)
 
     network2 = RewardPredictorNetwork()
