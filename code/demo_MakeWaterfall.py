@@ -9,4 +9,5 @@ def main():
         env="MineRLBasaltMakeWaterfall-v0",
         n_episodes=EVAL_EPISODES,
         max_steps=EVAL_MAX_STEPS,
+        show=True,
     )

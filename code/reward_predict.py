@@ -1,9 +1,10 @@
 import logging
-from code.preference_interface import Segment
+import queue
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from segment import Segment
 
 
 class RewardPredictorCore(nn.Module):
@@ -22,39 +23,39 @@ class RewardPredictorCore(nn.Module):
 
     def create_feature_extractor(self, batchnorm, dropout):
         layers = [
-            nn.Conv2d(3, 32, kernel_size=7, stride=3),
-            nn.BatchNorm2d(32) if batchnorm else nn.Identity(),
+            nn.Conv2d(3, 16, kernel_size=7, stride=3),
+            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
             nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
-            nn.Conv2d(32, 64, kernel_size=5, stride=2),
-            nn.BatchNorm2d(64) if batchnorm else nn.Identity(),
+            nn.Conv2d(16, 16, kernel_size=5, stride=2),
+            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
             nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, 128, kernel_size=3, stride=1),
-            nn.BatchNorm2d(128) if batchnorm else nn.Identity(),
+            nn.Conv2d(16, 16, kernel_size=3, stride=1),
+            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
             nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=1),
-            nn.BatchNorm2d(256) if batchnorm else nn.Identity(),
+            nn.Conv2d(16, 16, kernel_size=3, stride=1),
+            nn.BatchNorm2d(16) if batchnorm else nn.Identity(),
             nn.Dropout2d(dropout),
             nn.ReLU(inplace=True),
         ]
         return nn.Sequential(*layers)
 
     def create_classifier(self):
-        input_shape = (3, 360, 640)
+        input_shape = (3, 128, 128)
         output_size = self.calculate_output_size(input_shape)
         layers = [
-            nn.Linear(output_size, 512),
+            nn.Linear(output_size, 64),
             nn.ReLU(inplace=True),
-            nn.Linear(512, 1),
+            nn.Linear(64, 1),
         ]
         return nn.Sequential(*layers)
 
     def forward(self, x):
         x = x.float() / 255.0
         x = self.feature_extractor(x)
-        x = x.view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
         x = self.classifier(x)
         return x.view(-1)
 
@@ -77,9 +78,9 @@ class RewardPredictorNetwork(nn.Module):
     def reward(self, obs):
         obs = obs.to(self.device)
         r = self.core(obs)
-        return r
+        return r.item()
 
-    def train_step(self, s1: Segment, s2: Segment, pref: list):
+    def train_step(self, s1: Segment, s2, pref: list):
         # Sum the rewards for each segment
         r1sum = sum(s1.rewards)
         r2sum = sum(s2.rewards)
@@ -110,17 +111,21 @@ class RewardPredictorNetwork(nn.Module):
     def train(self, max_iterations=None):
         iteration = 0
         while True:
-            # Get a segment pair from the preference queue if there is any
-            s1, s2, pref = self.pref_queue.get()
-            loss = self.train_step(s1, s2, pref)
-            logging.debug("Trained on preference %s", pref)
-            logging.debug("Loss: %f", loss)
+            try:
+                # Get a segment pair from the preference queue if there is any
+                s1, s2, pref = self.pref_queue.get(timeout=1)
+                loss = self.train_step(s1, s2, pref)
+                logging.debug("Trained on preference %s", pref)
+                logging.debug("Loss: %f", loss)
 
-            # Increment the iteration counter and break if the maximum number of iterations is reached
-            if max_iterations is not None:
-                iteration += 1
-                if iteration >= max_iterations:
-                    break
+                # Increment the iteration counter and break if the maximum number of iterations is reached
+                if max_iterations is not None:
+                    iteration += 1
+                    if iteration >= max_iterations:
+                        break
+            except queue.Empty:
+                # If the preference queue is empty, continue waiting for preferences
+                continue
 
     def save(self, path):
         torch.save(self.core.state_dict(), path)

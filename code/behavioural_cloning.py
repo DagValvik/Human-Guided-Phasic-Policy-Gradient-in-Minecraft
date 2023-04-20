@@ -1,9 +1,4 @@
-# Basic behavioural cloning
-# Note: this uses gradient accumulation in batches of ones
-#       to perform training.
-#       This will fit inside even smaller GPUs (tested on 8GB one),
-#       but is slow.
-
+import os
 import pickle
 import time
 from argparse import ArgumentParser
@@ -13,92 +8,55 @@ import minerl
 import numpy as np
 import torch as th
 from data_loader import DataLoader
+from helpers import create_agent, load_model_parameters
 from openai_vpt.agent import PI_HEAD_KWARGS, MineRLAgent
 from openai_vpt.lib.tree_util import tree_map
 
-# Originally this code was designed for a small dataset of ~20 demonstrations per task.
-# The settings might not be the best for the full BASALT dataset (thousands of demonstrations).
-# Use this flag to switch between the two settings
-USING_FULL_DATASET = True
-
-EPOCHS = 10 if USING_FULL_DATASET else 2
-# Needs to be <= number of videos
-BATCH_SIZE = 12 if USING_FULL_DATASET else 16
-# Ideally more than batch size to create
-# variation in datasets (otherwise, you will
-# get a bunch of consecutive samples)
-# Decrease this (and batch_size) if you run out of memory
-N_WORKERS = 15 if USING_FULL_DATASET else 20
+EPOCHS = 2
+BATCH_SIZE = 16
+N_WORKERS = 24
 DEVICE = "cuda"
 
 LOSS_REPORT_RATE = 100
-
-# Tuned with bit of trial and error
-LEARNING_RATE = 0.000181
-# OpenAI VPT BC weight decay
-# WEIGHT_DECAY = 0.039428
-WEIGHT_DECAY = 0.0
-# KL loss to the original model was not used in OpenAI VPT
+LEARNING_RATE = 0.000181  # OpenAI VPT Paper
+WEIGHT_DECAY = 0.039428  # OpenAI VPT Paper
+# WEIGHT_DECAY = 0.0
 KL_LOSS_WEIGHT = 1.0
 MAX_GRAD_NORM = 5.0
-
-MAX_BATCHES = 2000 if USING_FULL_DATASET else int(1e9)
-
-
-def load_model_parameters(path_to_model_file):
-    agent_parameters = pickle.load(open(path_to_model_file, "rb"))
-    policy_kwargs = agent_parameters["model"]["args"]["net"]["args"]
-    pi_head_kwargs = agent_parameters["model"]["args"]["pi_head_opts"]
-    pi_head_kwargs["temperature"] = float(pi_head_kwargs["temperature"])
-    return policy_kwargs, pi_head_kwargs
+MAX_BATCHES = 40000  # Max number of batches to train for
 
 
-def behavioural_cloning_train(
+def behavior_cloning_train(
     data_dir, in_model, in_weights, out_weights, env_name
 ):
+    # Load model parameters and create agents
     agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(in_model)
-
-    # To create model with the right environment.
-    # All basalt environments have the same settings, so any of them works here
-    env = gym.make(env_name)
-    agent = MineRLAgent(
-        env,
-        device=DEVICE,
-        policy_kwargs=agent_policy_kwargs,
-        pi_head_kwargs=agent_pi_head_kwargs,
+    agent = create_agent(
+        env_name,
+        agent_policy_kwargs,
+        agent_pi_head_kwargs,
+        in_weights,
     )
-    agent.load_weights(in_weights)
-
-    # Create a copy which will have the original parameters
-    original_agent = MineRLAgent(
-        env,
-        device=DEVICE,
-        policy_kwargs=agent_policy_kwargs,
-        pi_head_kwargs=agent_pi_head_kwargs,
+    original_agent = create_agent(
+        env_name,
+        agent_policy_kwargs,
+        agent_pi_head_kwargs,
+        in_weights,
     )
-    original_agent.load_weights(in_weights)
-    env.close()
 
     policy = agent.policy
     original_policy = original_agent.policy
 
     # Freeze most params if using small dataset
-    for param in policy.parameters():
-        param.requires_grad = False
-    # Unfreeze final layers
-    trainable_parameters = []
-    for param in policy.net.lastlayer.parameters():
-        param.requires_grad = True
-        trainable_parameters.append(param)
-    for param in policy.pi_head.parameters():
-        param.requires_grad = True
-        trainable_parameters.append(param)
+    trainable_layers = [policy.net.lastlayer, policy.pi_head]
+    trainable_parameters = policy.parameters()
 
-    # Parameters taken from the OpenAI VPT paper
+    # Set up optimizer and learning rate scheduler
     optimizer = th.optim.Adam(
         trainable_parameters, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
 
+    # Initialize data loader
     data_loader = DataLoader(
         dataset_dir=data_dir,
         n_workers=N_WORKERS,
@@ -106,16 +64,12 @@ def behavioural_cloning_train(
         n_epochs=EPOCHS,
     )
 
+    # Training loop
     start_time = time.time()
-
-    # Keep track of the hidden state per episode/trajectory.
-    # DataLoader provides unique id for each episode, which will
-    # be different even for the same trajectory when it is loaded
-    # up again
     episode_hidden_states = {}
     dummy_first = th.from_numpy(np.array((False,))).to(DEVICE)
-
     loss_sum = 0
+
     for batch_i, (batch_images, batch_actions, batch_episode_id) in enumerate(
         data_loader
     ):
@@ -128,8 +82,7 @@ def behavioural_cloning_train(
                 if episode_id in episode_hidden_states:
                     removed_hidden_state = episode_hidden_states.pop(episode_id)
                     del removed_hidden_state
-                continue
-
+                    continue
             agent_action = agent._env_action_to_agent(
                 action, to_torch=True, check_if_null=True
             )
@@ -186,15 +139,14 @@ def behavioural_cloning_train(
         if batch_i % LOSS_REPORT_RATE == 0:
             time_since_start = time.time() - start_time
             print(
-                f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f}"
+                f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f} "
             )
             loss_sum = 0
 
-        if batch_i > MAX_BATCHES:
-            break
-
+    # Save the finetuned weights
     state_dict = policy.state_dict()
     th.save(state_dict, out_weights)
+    print("Saved weights to", out_weights)
 
 
 if __name__ == "__main__":
@@ -229,9 +181,8 @@ if __name__ == "__main__":
         default="MineRLBasaltFindCave-v0",
         help="Name of the environment to be used",
     )
-
     args = parser.parse_args()
-    behavioural_cloning_train(
+    behavior_cloning_train(
         args.data_dir,
         args.in_model,
         args.in_weights,

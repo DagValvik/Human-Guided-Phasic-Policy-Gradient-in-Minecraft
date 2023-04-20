@@ -11,3 +11,7 @@ def main():
         max_steps=EVAL_MAX_STEPS,
         show=True,
     )
+
+
+if __name__ == "__main__":
+    main()

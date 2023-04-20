@@ -26,6 +26,7 @@ def main(model, weights, env, n_episodes=3, max_steps=int(1e9), show=False):
             # We leave proper execution as an exercise for the participants :)
             action["ESC"] = 0
             obs, _, done, _ = env.step(action)
+
             if show:
                 env.render()
             if done:

@@ -1,8 +1,7 @@
 from queue import Queue
-from random import shuffle
 
+import cv2
 import numpy as np
-import torch
 
 
 class PreferenceInterface:
@@ -47,44 +46,29 @@ class PreferenceInterface:
         :param s2: The second segment
         :return: The user's preference
         """
-        raise NotImplementedError
+        # Combine the two segments horizontally
+        combined_frames = []
+        for f1, f2 in zip(s1.frames, s2.frames):
+            combined_frame = np.hstack((f1.numpy(), f2.numpy()))
+            combined_frames.append(combined_frame)
 
+        # Show the combined video
+        for frame in combined_frames:
+            cv2.imshow("Segment Pair", frame)
+            key = cv2.waitKey(1000 // 30)  # Assuming 30 FPS
+            if key != -1:
+                break
 
-class Segment:
-    """
-    A video recording of an agent's behavior in the environment,
-    consisting of a sequence of frames and the rewards it received during those frames.
-    """
+        cv2.destroyAllWindows()
 
-    def __init__(self):
-        """
-        :param frames: The frames of the segment
-        :param rewards: The rewards of the segment
-        """
-        self.frames = []
-        self.rewards = []
-        self.hash = None
-
-    def add_frame(self, frame, reward):
-        """
-        Add a frame and its reward to the segment.
-        :param frame: The frame
-        :param reward: The reward
-        """
-        self.frames.append(frame)
-        self.rewards.append(reward)
-
-    def finish(self, sequence_id=None):
-        """
-        Finish the segment.
-        """
-        if sequence_id is not None:
-            self.sequence_id = sequence_id
-        else:
-            self.hash = hash(torch.cat(self.frames).numpy().tobytes())
-
-    def __len__(self):
-        """
-        :return: The length of the segment
-        """
-        return len(self.frames)
+        # Get the user's preference
+        while True:
+            pref = input(
+                "Enter 1 for the first segment or 2 for the second segment: "
+            ).strip()
+            if pref == "1":
+                return [1.0, 0.0]
+            elif pref == "2":
+                return [0.0, 1.0]
+            else:
+                print("Invalid input. Please enter 1 or 2.")

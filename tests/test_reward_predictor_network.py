@@ -1,6 +1,6 @@
 import queue
-from code.preference_interface import Segment
 from code.reward_predict import RewardPredictorCore, RewardPredictorNetwork
+from code.segment import Segment
 
 import torch
 
@@ -20,7 +20,8 @@ def test_reward_predictor_network_creation():
 # Test if the RewardPredictorNetwork can calculate rewards
 def test_reward_calculation():
     network = RewardPredictorNetwork()
-    obs = torch.randn(1, 3, 360, 640)  # Random tensor simulating a video frame
+    obs = torch.randn(1, 3, 128, 128)  # Create a random observation
+    assert obs.size() == torch.Size([1, 3, 128, 128])
     rewards = network.reward(obs)
     assert rewards.size() == torch.Size([1])
     # Check if the reward is a float
@@ -34,9 +35,9 @@ def test_train_step():
     s1 = Segment()
     s2 = Segment()
     # Add a frame to each segment
-    s1.add_frame(torch.randn(3, 360, 640), 0.0)
+    s1.add_frame(torch.randn(1, 3, 128, 128), 0.0)
     s1.finish()
-    s2.add_frame(torch.randn(3, 360, 640), 0.0)
+    s2.add_frame(torch.randn(1, 3, 128, 128), 0.5)
     s2.finish()
     # Create a preference list
     pref = [1.0, 0.0]
@@ -55,9 +56,9 @@ def test_train():
     s1 = Segment()
     s2 = Segment()
     # Add a frame to each segment
-    s1.add_frame(torch.randn(3, 360, 640), 0.0)
+    s1.add_frame(torch.randn(1, 3, 128, 128), 0.0)
     s1.finish()
-    s2.add_frame(torch.randn(3, 360, 640), 0.0)
+    s2.add_frame(torch.randn(1, 3, 128, 128), 0.0)
     s2.finish()
 
     pref_queue.put((s1, s2, [1.0, 0.0]))

@@ -9,4 +9,9 @@ def main():
         env="MineRLBasaltFindCave-v0",
         n_episodes=EVAL_EPISODES,
         max_steps=EVAL_MAX_STEPS,
+        show=True,
     )
+
+
+if __name__ == "__main__":
+    main()
