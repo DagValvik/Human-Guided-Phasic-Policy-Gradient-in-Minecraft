@@ -1,39 +1,43 @@
 import os
 import random
 import sys
-from collections import deque
+from collections import deque, namedtuple
 from dataclasses import dataclass
 
 import gym
 import numpy as np
 import torch as th
 import torch.nn.functional as F
-from helpers import create_agent, load_model_parameters
-from memory import AuxMemory, Memory
+from helpers import (
+    clipped_value_loss,
+    create_agent,
+    load_model_parameters,
+    normalize,
+    update_network_,
+)
+
+# from memory import AuxMemory, Memory
 from openai_vpt.lib.tree_util import tree_map
 from torch import nn
 from torch.distributions import Categorical
 from torch.optim import Adam
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-
-@dataclass
-class PPOParams:
-    epochs: int
-    minibatch_size: int
-    lr: float
-    betas: tuple
-    gamma: float
-    lam: float
-    eps_clip: float
-    value_clip: float
-
-
-@dataclass
-class AuxParams:
-    epochs: int
-    num_policy_updates_per_aux: int
+Memory = namedtuple(
+    "Memory",
+    [
+        "agent_obs",
+        "action",
+        "action_log_prob",
+        "reward",
+        "done",
+        "value",
+        "agent_hidden_state",
+        "critic_hidden_state",
+    ],
+)
+AuxMemory = namedtuple("Memory", ["agent_obs", "target_value", "old_values"])
 
 
 class PPG:
@@ -43,13 +47,27 @@ class PPG:
         model,
         weights,
         out_weights,
-        ppo_params: PPOParams,
-        aux_params: AuxParams,
         device,
-        reward_predictor=None,
+        reward_predictor,
+        epochs,
+        epochs_aux,
+        minibatch_size,
+        lr,
+        betas,
+        gamma,
+        lam,
+        clip,
+        value_clip,
     ):
-        self.ppo_params = ppo_params
-        self.aux_params = aux_params
+        self.epochs = epochs
+        self.epochs_aux = epochs_aux
+        self.minibatch_size = minibatch_size
+        self.lr = lr
+        self.betas = betas
+        self.gamma = gamma
+        self.lam = lam
+        self.clip = clip
+        self.value_clip = value_clip
         self.env_name = env_name
         self.reward_predictor = reward_predictor
         self.device = device
@@ -61,22 +79,22 @@ class PPG:
         self.agent = create_agent(
             env_name, agent_policy_kwargs, agent_pi_head_kwargs, weights
         )
-        self.auxiliary = create_agent(
+        self.critic = create_agent(
             env_name, agent_policy_kwargs, agent_pi_head_kwargs, weights
         )
         self.agent_optim = Adam(
             self.agent.policy.parameters(),
-            lr=self.ppo_params.lr,
-            betas=self.ppo_params.betas,
+            lr=self.lr,
+            betas=self.betas,
         )
 
-        auxiliary_params = list(
-            self.auxiliary.policy.value_head.parameters()
-        ) + list(self.auxiliary.policy.net.parameters())
-        self.auxiliary_optim = Adam(
-            auxiliary_params,
-            lr=self.ppo_params.lr,
-            betas=self.ppo_params.betas,
+        critic_params = list(self.critic.policy.value_head.parameters()) + list(
+            self.critic.policy.net.parameters()
+        )
+        self.critic_optim = Adam(
+            critic_params,
+            lr=self.lr,
+            betas=self.betas,
         )
 
         # TODO: Implement scheduler
@@ -89,16 +107,16 @@ class PPG:
         self,
         num_episodes,
         max_timesteps,
-        render=False,
-        render_every_eps=250,
-        save_every=1000,
-        update_timesteps=32,
-        num_policy_updates_per_aux=5,
+        render,
+        render_every_eps,
+        save_every,
+        update_timesteps,
+        num_policy_updates_per_aux,
     ):
         env = gym.make(self.env_name)
 
-        memories = Memory()
-        aux_memories = AuxMemory()
+        memories = deque([])
+        aux_memories = deque([])
 
         time = 0
         updated = False
@@ -108,68 +126,71 @@ class PPG:
             render_eps = render and eps % render_every_eps == 0
             obs = env.reset()
             dummy_first = th.from_numpy(np.array((False,))).to(self.device)
-            hidden_state = None
-            done = False
+
+            # Reset the hidden state for the policy
+            initial_critic_hidden_state = self.critic.policy.initial_state(1)
+            initial_agent_hidden_state = self.agent.policy.initial_state(1)
+            agent_hidden_state = initial_agent_hidden_state
+            critic_hidden_state = initial_critic_hidden_state
+
             for timestep in range(max_timesteps):
                 time += 1
 
-                if updated and render_eps:
-                    env.render()
-
-                if hidden_state is None:
-                    # Get initial state for policy
-                    hidden_state = self.agent.policy.initial_state(1)
+                # if updated and render_eps:
+                #     env.render()
+                env.render()
 
                 # Preprocess the observation
                 agent_obs = self.agent._env_obs_to_agent(obs)
 
-                with th.no_grad():
-                    # Get the action and value prediction
-                    (
-                        pi_distribution,
-                        v_prediction,
-                        next_hidden_state,
-                    ) = self.agent.policy.get_output_for_observation(
-                        agent_obs, hidden_state, dummy_first
-                    )
-
-                action = self.agent.get_action(obs)
-
-                agent_action = self.agent._env_action_to_agent(
-                    action, to_torch=True, check_if_null=True
+                # get the action and next hidden state, log prob
+                action, new_agent_state, result = self.agent.policy.act(
+                    agent_obs, dummy_first, agent_hidden_state
                 )
 
-                log_prob = self.agent.policy.get_logprob_of_action(
-                    pi_distribution, agent_action
+                # get the value prediction and next hidden state for the critic
+                value, new_critic_state = self.critic.policy.v(
+                    agent_obs, dummy_first, critic_hidden_state
                 )
 
                 # Take the action in the environment
-                minerl_action = self.agent._agent_action_to_env(agent_action)
+                minerl_action = self.agent._agent_action_to_env(action)
                 minerl_action["ESC"] = 0
-                next_obs, _, next_done, _ = env.step(minerl_action)
+                next_obs, _, done, _ = env.step(minerl_action)
 
                 # convert to NCHW
                 input_tensor = agent_obs["img"].permute(0, 3, 1, 2)
                 # Predict the reward for the observation
                 reward = self.reward_predictor.reward(input_tensor)
 
-                memories.save(
-                    agent_obs=agent_obs,
-                    action=agent_action,
-                    action_log_prob=log_prob,
-                    value=v_prediction,
-                    reward=reward,
-                    done=done,
-                    hidden_state=hidden_state,
+                # Can't store hidden states since we run out of memory
+                memory = Memory(
+                    agent_obs,
+                    action,
+                    result["log_prob"],
+                    reward,
+                    done,
+                    value,
+                    0,
+                    0,
                 )
 
-                # Update the hidden state for the next iteration
-                hidden_state = next_hidden_state
+                memories.append(memory)
+
+                # Update the hidden state for the next timestep
+                agent_hidden_state = new_agent_state
+                critic_hidden_state = new_critic_state
                 obs = next_obs
-                done = next_done
 
                 if time % update_timesteps == 0:
-                    self.learn(memories, aux_memories)
+                    self.learn(
+                        memories,
+                        aux_memories,
+                        next_obs,
+                        new_critic_state,
+                        initial_agent_hidden_state,
+                        initial_critic_hidden_state,
+                    )
                     num_policy_updates += 1
                     memories.clear()
 
@@ -190,120 +211,143 @@ class PPG:
             if eps % save_every == 0:
                 self.save()
 
-    def learn(self, memories, aux_memories):
-        # Calculate the generalized advantage estimate
-        v_predictions = memories.values
-        rewards = memories.rewards
-        masks = [1 - float(done) for done in memories.dones]
+    def learn(
+        self,
+        memories,
+        aux_memories,
+        next_obs,
+        critic_hidden_state,
+        initial_agent_hidden_state,
+        initial_critic_hidden_state,
+    ):
+        # prepare the memories
+        agent_observations = [memory.agent_obs for memory in memories]
+        actions = [memory.action for memory in memories]
+        old_log_probs = [memory.action_log_prob for memory in memories]
+        rewards = [memory.reward for memory in memories]
+        masks = [1 - float(memory.done) for memory in memories]
+        values = [memory.value for memory in memories]
+
+        # Get the value prediction for the next observation
+        dummy_first = th.from_numpy(np.array((False,))).to(self.device)
+        agent_obs = self.agent._env_obs_to_agent(next_obs)
+        next_value, _ = self.critic.policy.v(
+            agent_obs, dummy_first, critic_hidden_state
+        )
+        values = values + [next_value]
 
         returns = self.calculate_gae(
             rewards,
-            v_predictions,
+            values,
             masks,
-            self.ppo_params.gamma,
-            self.ppo_params.lam,
+            self.gamma,
+            self.lam,
         )
 
-        # Store obs and target values to auxiliary memory buffer for later training
-        aux_memories.save_all(
-            agent_obs=memories.agent_obs,
-            returns=returns,
-            dones=memories.dones,
-        )
+        # convert values to torch tensors
+        to_torch_tensor = lambda t: th.stack(t).to(self.device).detach()
+        # Detach all the tensors
+        old_log_probs = to_torch_tensor(old_log_probs)
+        old_values = to_torch_tensor(values[:-1])
 
-        dummy_first = th.from_numpy(np.array((False,))).to(self.device)
+        rewards = th.tensor(returns).float().to(self.device)
 
-        indices = list(range(len(memories)))
-        random.shuffle(indices)
+        aux_memory = AuxMemory(agent_observations, rewards, old_values)
+        aux_memories.append(aux_memory)
 
-        # Policy phase training
-        for _ in range(self.ppo_params.epochs):
-            for i in range(0, len(indices), self.ppo_params.minibatch_size):
-                batch_indices = indices[i : i + self.ppo_params.minibatch_size]
-                batch_agent_obs = [
-                    memories.agent_obs[idx] for idx in batch_indices
-                ]
-                batch_hidden_states = [
-                    memories.hidden_states[idx] for idx in batch_indices
-                ]
-                batch_actions = [memories.actions[idx] for idx in batch_indices]
-                batch_action_log_probs = [
-                    memories.action_log_probs[idx] for idx in batch_indices
-                ]
-                batch_rewards = [memories.rewards[idx] for idx in batch_indices]
-                batch_dones = [memories.dones[idx] for idx in batch_indices]
-                batch_values = [memories.values[idx] for idx in batch_indices]
+        # Policy phase training (PPO)
+        for _ in range(self.epochs):
+            agent_hidden_state = initial_agent_hidden_state
+            critic_hidden_state = initial_critic_hidden_state
 
-                # Convert actions and old_log_probs to tensors
-                old_log_probs = th.tensor(
-                    batch_action_log_probs, dtype=th.float32, requires_grad=True
-                ).to(self.device)
+            # Try to create a dummy first tensor for the batch
+            dummy_first = th.from_numpy(
+                np.array((False,) * self.minibatch_size)
+            ).to(self.device)
 
-                rewards = th.tensor(batch_rewards, dtype=th.float32).to(
-                    self.device
+            print(f"dummy_first: {dummy_first.shape}")
+
+            for start in range(0, len(memories), self.minibatch_size):
+                end = start + self.minibatch_size
+                minibatch = slice(start, end)
+                # Get the minibatch
+                agent_obs_batch = batch_agent_obs(agent_observations[minibatch])
+                actions_batch = actions[minibatch]
+                old_log_probs_batch = old_log_probs[minibatch]
+                old_values_batch = old_values[minibatch]
+                rewards_batch = rewards[minibatch]
+
+                action_log_probs = []
+                values = []
+
+                print(agent_obs_batch)
+
+                # Test batch pi and value predictions
+                (pi_dist, _), _ = self.agent.policy.net(
+                    agent_obs_batch,
+                    agent_hidden_state,
+                    context={"first": dummy_first},
                 )
-                values = th.tensor(
-                    batch_values, dtype=th.float32, requires_grad=True
-                ).to(self.device)
 
-                log_probs = []
-
-                # Calculate pi distribution and log probs for batch
-                for i in range(len(batch_dones)):
-                    hidden_state = batch_hidden_states[i]
-                    agent_obs = batch_agent_obs[i]
-                    agent_action = batch_actions[i]
-
-                    with th.no_grad():
-                        (
-                            pi_distribution,
-                            _,
-                            _,
-                        ) = self.agent.policy.get_output_for_observation(
-                            agent_obs, hidden_state, dummy_first
-                        )
-
-                    log_prob = self.agent.policy.get_logprob_of_action(
-                        pi_distribution, agent_action
-                    )
-
-                    log_probs.append(log_prob)
-
-                log_probs = th.stack(log_probs)
-
-                # Calculate the policy ratios
-                policy_ratio = (log_probs - old_log_probs).exp()
-
-                # Calculate the advantages
-                advantages = rewards - values.detach()
-
-                # Calculate the surrogate objective function (unclipped)
-                surrogate_obj = policy_ratio * advantages
-                # Calculate the clipped surrogate objective
-                surrogate_clip = th.clamp(
-                    policy_ratio,
-                    1 - self.ppo_params.eps_clip,
-                    1 + self.ppo_params.eps_clip,
+                (_, values), _ = self.critic.policy.net(
+                    agent_obs_batch,
+                    critic_hidden_state,
+                    context={"first": dummy_first},
                 )
-                clipped_surrogate_obj = surrogate_clip * advantages
 
-                # Calculate the final policy loss
-                policy_loss = -th.min(
-                    surrogate_obj, clipped_surrogate_obj
-                ).mean()
+                # get log probs
 
-                # Calculate the value loss using the Huber loss (smooth L1 loss)
-                value_loss = F.smooth_l1_loss(values, rewards)
+                action_log_probs = self.agent.policy.pi_head.logprob(
+                    actions_batch, pi_dist
+                )
 
-                # Backprop for policy
-                policy_loss.backward(retain_graph=True)
-                # Backprop for value
-                value_loss.backward()
+                # # Calculate pi distribution, log probs, and values for the batch
+                # for a_obs, ac in zip(agent_obs, actions_batch):
+                #     (
+                #         pi_distribution,
+                #         _,
+                #         new_agent_state,
+                #     ) = self.agent.policy.get_output_for_observation(
+                #         a_obs, agent_hidden_state, dummy_first
+                #     )
+                #     log_prob = self.agent.policy.get_logprob_of_action(
+                #         pi_distribution, ac
+                #     )
+                #     action_log_probs.append(log_prob)
 
-            self.agent_optim.step()
-            self.agent_optim.zero_grad()
-            self.auxiliary_optim.step()
-            self.auxiliary_optim.zero_grad()
+                #     (
+                #         _,
+                #         v_prediction,
+                #         new_critic_state,
+                #     ) = self.critic.policy.get_output_for_observation(
+                #         a_obs, critic_hidden_state, dummy_first
+                #     )
+                #     values.append(v_prediction)
+
+                #     agent_state = new_agent_state
+                #     critic_state = new_critic_state
+
+                # action_log_probs = th.stack(action_log_probs).to(self.device)
+                # values = th.stack(values).to(self.device)
+
+                ratios = (action_log_probs - old_log_probs_batch).exp()
+                advantages = normalize(
+                    (rewards_batch - old_values_batch.detach())
+                )
+                surr1 = ratios * advantages
+                surr2 = ratios.clamp(1 - self.clip, 1 + self.clip) * advantages
+                policy_loss = -th.min(surr1, surr2)  # - self.betas  # * entropy
+
+                update_network_(policy_loss, self.agent_optim)
+
+                value_loss = clipped_value_loss(
+                    values,
+                    rewards_batch,
+                    old_values_batch,
+                    self.value_clip,
+                )
+
+                update_network_(value_loss, self.critic_optim)
 
     def learn_aux(self, aux_memories):
         # Gather states and target values into one tensor
@@ -330,3 +374,15 @@ class PPG:
             gae = delta + gamma * lam * masks[step] * gae
             returns.insert(0, gae + values[step])
         return returns
+
+
+def batch_agent_obs(agent_obs_list):
+    keys = agent_obs_list[0].keys()
+    batched_agent_obs = {}
+
+    for key in keys:
+        batched_agent_obs[key] = th.stack(
+            [agent_obs[key] for agent_obs in agent_obs_list]
+        )
+
+    return batched_agent_obs

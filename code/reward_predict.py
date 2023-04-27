@@ -75,6 +75,7 @@ class RewardPredictorNetwork(nn.Module):
         self.optimizer = optim.Adam(self.core.parameters(), lr=0.001)
         self.pref_queue = pref_queue
 
+    @torch.no_grad()
     def reward(self, obs):
         obs = obs.to(self.device)
         r = self.core(obs)
