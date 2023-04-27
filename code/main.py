@@ -6,7 +6,7 @@ import torch as th
 from helpers import exists
 from memory import Memory
 from openai_vpt.lib.tree_util import tree_map
-from ppg import PPG, AuxParams, PPOParams
+from ppg import PPG
 from reward_predict import RewardPredictorNetwork
 from tqdm import tqdm
 
@@ -32,38 +32,32 @@ def main(
 
     reward_predictor = RewardPredictorNetwork()
 
-    ppo_params = PPOParams(
-        epochs=4,
-        minibatch_size=8,
-        lr=3e-4,
-        betas=(0.9, 0.999),
-        gamma=0.99,
-        lam=0.95,
-        eps_clip=0.2,
-        value_clip=0.2,
-    )
-
-    aux_params = AuxParams(
-        epochs=5,
-        num_policy_updates_per_aux=2,
-    )
-
     ppg = PPG(
         env_name,
         model,
         weights,
         out_weights,
-        ppo_params,
-        aux_params,
         device,
         reward_predictor,
+        epochs=1,
+        epochs_aux=6,
+        minibatch_size=32,
+        lr=3e-4,
+        betas=(0.9, 0.999),
+        gamma=0.99,
+        lam=0.95,
+        clip=0.2,
+        value_clip=0.2,
     )
 
     ppg.train(
-        num_episodes=100,
-        max_timesteps=5000,
-        update_timesteps=80,
-        num_policy_updates_per_aux=5,
+        num_episodes=500000,
+        max_timesteps=500,
+        render=False,
+        update_timesteps=500,
+        num_policy_updates_per_aux=32,
+        render_every_eps=250,
+        save_every=1000,
     )
 
 
