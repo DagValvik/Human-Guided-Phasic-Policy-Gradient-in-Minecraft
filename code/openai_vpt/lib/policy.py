@@ -4,9 +4,6 @@ from typing import Dict, Optional
 import numpy as np
 import torch as th
 from gym3.types import DictType
-from torch import nn
-from torch.nn import functional as F
-
 from openai_vpt.lib.action_head import make_action_head
 from openai_vpt.lib.action_mapping import CameraHierarchicalMapping
 from openai_vpt.lib.impala_cnn import ImpalaCNN
@@ -14,6 +11,8 @@ from openai_vpt.lib.normalize_ewma import NormalizeEwma
 from openai_vpt.lib.scaled_mse_head import ScaledMSEHead
 from openai_vpt.lib.tree_util import tree_map
 from openai_vpt.lib.util import FanInInitReLULayer, ResidualRecurrentBlocks
+from torch import nn
+from torch.nn import functional as F
 
 
 class ImgPreprocessing(nn.Module):
@@ -24,13 +23,19 @@ class ImgPreprocessing(nn.Module):
     :param scale_img: If true and img_statistics not specified, scale incoming images by 1/255.
     """
 
-    def __init__(self, img_statistics: Optional[str] = None, scale_img: bool = True):
+    def __init__(
+        self, img_statistics: Optional[str] = None, scale_img: bool = True
+    ):
         super().__init__()
         self.img_mean = None
         if img_statistics is not None:
             img_statistics = dict(**np.load(img_statistics))
-            self.img_mean = nn.Parameter(th.Tensor(img_statistics["mean"]), requires_grad=False)
-            self.img_std = nn.Parameter(th.Tensor(img_statistics["std"]), requires_grad=False)
+            self.img_mean = nn.Parameter(
+                th.Tensor(img_statistics["mean"]), requires_grad=False
+            )
+            self.img_std = nn.Parameter(
+                th.Tensor(img_statistics["std"]), requires_grad=False
+            )
         else:
             self.ob_scale = 255.0 if scale_img else 1.0
 
@@ -141,7 +146,10 @@ class MinecraftPolicy(nn.Module):
         # Dense init kwargs replaces batchnorm/groupnorm with layernorm
         self.init_norm_kwargs = init_norm_kwargs
         self.dense_init_norm_kwargs = deepcopy(init_norm_kwargs)
-        if self.dense_init_norm_kwargs.get("group_norm_groups", None) is not None:
+        if (
+            self.dense_init_norm_kwargs.get("group_norm_groups", None)
+            is not None
+        ):
             self.dense_init_norm_kwargs.pop("group_norm_groups", None)
             self.dense_init_norm_kwargs["layer_norm"] = True
         if self.dense_init_norm_kwargs.get("batch_norm", False):
@@ -149,7 +157,9 @@ class MinecraftPolicy(nn.Module):
             self.dense_init_norm_kwargs["layer_norm"] = True
 
         # Setup inputs
-        self.img_preprocess = ImgPreprocessing(img_statistics=img_statistics, scale_img=scale_input_img)
+        self.img_preprocess = ImgPreprocessing(
+            img_statistics=img_statistics, scale_img=scale_input_img
+        )
         self.img_process = ImgObsProcess(
             cnn_outsize=256,
             output_size=hidsize,
@@ -182,7 +192,9 @@ class MinecraftPolicy(nn.Module):
             n_block=n_recurrence_layers,
         )
 
-        self.lastlayer = FanInInitReLULayer(hidsize, hidsize, layer_type="linear", **self.dense_init_norm_kwargs)
+        self.lastlayer = FanInInitReLULayer(
+            hidsize, hidsize, layer_type="linear", **self.dense_init_norm_kwargs
+        )
         self.final_ln = th.nn.LayerNorm(hidsize)
 
     def output_latent_size(self):
@@ -230,10 +242,19 @@ class MinecraftAgentPolicy(nn.Module):
         self.action_space = action_space
 
         self.value_head = self.make_value_head(self.net.output_latent_size())
-        self.pi_head = self.make_action_head(self.net.output_latent_size(), **pi_head_kwargs)
+        self.pi_head = self.make_action_head(
+            self.net.output_latent_size(), **pi_head_kwargs
+        )
 
-    def make_value_head(self, v_out_size: int, norm_type: str = "ewma", norm_kwargs: Optional[Dict] = None):
-        return ScaledMSEHead(v_out_size, 1, norm_type=norm_type, norm_kwargs=norm_kwargs)
+    def make_value_head(
+        self,
+        v_out_size: int,
+        norm_type: str = "ewma",
+        norm_kwargs: Optional[Dict] = None,
+    ):
+        return ScaledMSEHead(
+            v_out_size, 1, norm_type=norm_type, norm_kwargs=norm_kwargs
+        )
 
     def make_action_head(self, pi_out_size: int, **pi_head_opts):
         return make_action_head(self.action_space, pi_out_size, **pi_head_opts)
@@ -259,7 +280,9 @@ class MinecraftAgentPolicy(nn.Module):
         else:
             mask = None
 
-        (pi_h, v_h), state_out = self.net(obs, state_in, context={"first": first})
+        (pi_h, v_h), state_out = self.net(
+            obs, state_in, context={"first": first}
+        )
 
         pi_logits = self.pi_head(pi_h, mask=mask)
         vpred = self.value_head(v_h)
@@ -298,17 +321,29 @@ class MinecraftAgentPolicy(nn.Module):
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
 
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
+        (pd, vpred, _), state_out = self(
+            obs=obs, first=first, state_in=state_in
+        )
 
         return pd, self.value_head.denormalize(vpred)[:, 0], state_out
 
     @th.no_grad()
-    def act(self, obs, first, state_in, stochastic: bool = True, taken_action=None, return_pd=False):
+    def act(
+        self,
+        obs,
+        first,
+        state_in,
+        stochastic: bool = True,
+        taken_action=None,
+        return_pd=False,
+    ):
         # We need to add a fictitious time dimension everywhere
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
 
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
+        (pd, vpred, _), state_out = self(
+            obs=obs, first=first, state_in=state_in
+        )
 
         if taken_action is None:
             ac = self.pi_head.sample(pd, deterministic=not stochastic)
@@ -318,7 +353,10 @@ class MinecraftAgentPolicy(nn.Module):
         assert not th.isnan(log_prob).any()
 
         # After unsqueezing, squeeze back to remove fictitious time dimension
-        result = {"log_prob": log_prob[:, 0], "vpred": self.value_head.denormalize(vpred)[:, 0]}
+        result = {
+            "log_prob": log_prob[:, 0],
+            "vpred": self.value_head.denormalize(vpred)[:, 0],
+        }
         if return_pd:
             result["pd"] = tree_map(lambda x: x[:, 0], pd)
         ac = tree_map(lambda x: x[:, 0], ac)
@@ -331,7 +369,9 @@ class MinecraftAgentPolicy(nn.Module):
         obs = tree_map(lambda x: x.unsqueeze(1), obs)
         first = first.unsqueeze(1)
 
-        (pd, vpred, _), state_out = self(obs=obs, first=first, state_in=state_in)
+        (pd, vpred, _), state_out = self(
+            obs=obs, first=first, state_in=state_in
+        )
 
         # After unsqueezing, squeeze back
-        return self.value_head.denormalize(vpred)[:, 0]
+        return self.value_head.denormalize(vpred)[:, 0], state_out
