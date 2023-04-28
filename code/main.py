@@ -7,6 +7,7 @@ from helpers import exists
 from memory import Memory
 from openai_vpt.lib.tree_util import tree_map
 from ppg import PPG
+from preference_interface import PreferenceInterface
 from reward_predict import RewardPredictorNetwork
 from tqdm import tqdm
 
@@ -30,7 +31,11 @@ def main(
     """
     device = th.device(DEVICE if th.cuda.is_available() else "cpu")
 
-    reward_predictor = RewardPredictorNetwork()
+    preference_queue = deque(maxlen=100)
+    sequence_queue = deque(maxlen=100)
+
+    reward_predictor = RewardPredictorNetwork(pref_queue=preference_queue)
+    pref_interface = PreferenceInterface(sequence_queue, preference_queue)
 
     ppg = PPG(
         env_name,
@@ -39,6 +44,7 @@ def main(
         out_weights,
         device,
         reward_predictor,
+        pref_interface,
         epochs=1,
         epochs_aux=6,
         minibatch_size=32,

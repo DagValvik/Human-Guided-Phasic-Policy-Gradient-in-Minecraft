@@ -16,6 +16,7 @@ from memory import AuxMemory, Episode, Memory, create_dataloader
 
 # from memory import AuxMemory, Memory
 from openai_vpt.lib.tree_util import tree_map
+from segment import Segment
 from torch.optim import Adam
 from tqdm import tqdm
 
@@ -29,6 +30,7 @@ class PPG:
         out_weights,
         device,
         reward_predictor,
+        preference_interface,
         epochs,
         epochs_aux,
         minibatch_size,
@@ -50,6 +52,7 @@ class PPG:
         self.value_clip = value_clip
         self.env_name = env_name
         self.reward_predictor = reward_predictor
+        self.preference_interface = preference_interface
         self.device = device
         self.out_weights = out_weights
 
@@ -193,7 +196,11 @@ class PPG:
             )
 
             # Perform learning for each episode's memories
-            for episode_id, episode in enumerate(memories):
+            episode_id = 0
+            while memories:
+                # Get the episode
+                episode = memories.popleft()
+
                 self.learn(
                     episode,
                     aux_memories,
@@ -203,16 +210,34 @@ class PPG:
 
                 num_policy_updates += 1
 
+                # Prepare segments from the episode
+                rewards = [memory.reward for memory in episode]
+                frames = [memory.agent_obs["img"] for memory in episode]
+
+                # Convert frames to numpy and rewards to scalar values
+                frames = [frame.cpu().numpy() for frame in frames]
+                rewards = [reward for reward in rewards]
+
+                # Split the episode into fixed-length segments
+                segment_length = 100
+                segments = create_fixed_length_segments(
+                    frames, rewards, segment_length
+                )
+                # Add the segments to the preference interface
+                self.preference_interface.add_segments(segments)
+
                 if (
                     num_policy_updates
                     % num_policy_updates_per_preference_update
                     == 0
                 ):
                     # ask user for preferences on seqments
-                    # update reward predictor
+                    self.preference_interface.get_preferences()
+                    # update reward predictor22
 
-                    memories.clear()
                     pass
+
+                episode_id += 1
 
                 # Perform auxiliary learning if required
                 if num_policy_updates % num_policy_updates_per_aux == 0:
@@ -225,17 +250,17 @@ class PPG:
             if eps % save_every == 0:
                 self.save()
 
-    def learn(self, memories, aux_memories, initial_hidden_states, episode_id):
+    def learn(self, episode, aux_memories, initial_hidden_states, episode_id):
         # prepare the memories
-        agent_observations = [memory.agent_obs for memory in memories]
-        actions = [memory.action for memory in memories]
-        old_log_probs = [memory.action_log_prob for memory in memories]
-        rewards = [memory.reward for memory in memories]
-        masks = [1 - float(memory.done) for memory in memories]
-        values = [memory.value for memory in memories]
+        agent_observations = [memory.agent_obs for memory in episode]
+        actions = [memory.action for memory in episode]
+        old_log_probs = [memory.action_log_prob for memory in episode]
+        rewards = [memory.reward for memory in episode]
+        masks = [1 - float(memory.done) for memory in episode]
+        values = [memory.value for memory in episode]
 
         # Use the next_value from the last memory in the episode
-        next_value = memories[-1].next_value
+        next_value = episode[-1].next_value
         values = values + [next_value]
 
         returns = calculate_gae(
@@ -262,13 +287,8 @@ class PPG:
 
         # Policy phase training (PPO)
         for _ in range(self.epochs):
-            agent_hidden_states = tree_map(
-                lambda x: x.detach(), initial_hidden_states["agent"][episode_id]
-            )
-            critic_hidden_state = tree_map(
-                lambda x: x.detach(),
-                initial_hidden_states["critic"][episode_id],
-            )
+            agent_hidden_states = initial_hidden_states["agent"][episode_id]
+            critic_hidden_state = initial_hidden_states["critic"][episode_id]
 
             dummy_first = th.from_numpy(np.array((False,))).to(self.device)
 
@@ -288,7 +308,7 @@ class PPG:
                 camera_tensors = th.unbind(actions_batch["camera"])
 
                 # Iterate over the unstacked tensors directly
-                for i, (
+                for _, (
                     obs_tensor,
                     buttons_tensor,
                     camera_tensor,
@@ -307,7 +327,7 @@ class PPG:
                         agent_obs_batch, agent_hidden_states, dummy_first
                     )
 
-                    # Run the disjoint value network
+                    # Run the critic to get the value prediction
                     (
                         _,
                         v_prediction,
@@ -327,6 +347,12 @@ class PPG:
                     log_probs.append(action_log_prob)
 
                     # Update hidden states for the next iteration
+                    next_agent_hidden_state = tree_map(
+                        lambda x: x.detach(), next_agent_hidden_state
+                    )
+                    next_critic_hidden_state = tree_map(
+                        lambda x: x.detach(), next_critic_hidden_state
+                    )
                     agent_hidden_states = next_agent_hidden_state
                     critic_hidden_state = next_critic_hidden_state
 
@@ -336,12 +362,12 @@ class PPG:
 
                 ratios = (log_probs - old_log_probs_batch).exp()
                 advantages = normalize(
-                    rewards_batch.detach() - old_values_batch.detach()
+                    rewards_batch - old_values_batch.detach()
                 )
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(1 - self.clip, 1 + self.clip) * advantages
                 policy_loss = -th.min(surr1, surr2)  # - self.betas  # * entropy
-
+                batch_policy_loss = policy_loss.mean().item()
                 update_network_(policy_loss, self.agent_optim)
 
                 value_loss = clipped_value_loss(
@@ -350,69 +376,11 @@ class PPG:
                     old_values_batch,
                     self.value_clip,
                 )
+                batch_value_loss = value_loss.mean().item()
 
                 update_network_(value_loss, self.critic_optim)
 
-            # for start in range(0, len(memories), self.minibatch_size):
-            #     end = start + self.minibatch_size
-            #     minibatch = slice(start, end)
-            #     # Get the minibatch
-            #     agent_obs_batch = batch_agent_obs(agent_observations[minibatch])
-            #     actions_batch = actions[minibatch]
-            #     old_log_probs_batch = old_log_probs[minibatch]
-            #     old_values_batch = old_values[minibatch]
-            #     rewards_batch = rewards[minibatch]
-
-            #     action_log_probs = []
-            #     values = []
-
-            #     # # Calculate pi distribution, log probs, and values for the batch
-            #     # for a_obs, ac in zip(agent_obs, actions_batch):
-            #     #     (
-            #     #         pi_distribution,
-            #     #         _,
-            #     #         new_agent_state,
-            #     #     ) = self.agent.policy.get_output_for_observation(
-            #     #         a_obs, agent_hidden_state, dummy_first
-            #     #     )
-            #     #     log_prob = self.agent.policy.get_logprob_of_action(
-            #     #         pi_distribution, ac
-            #     #     )
-            #     #     action_log_probs.append(log_prob)
-
-            #     #     (
-            #     #         _,
-            #     #         v_prediction,
-            #     #         new_critic_state,
-            #     #     ) = self.critic.policy.get_output_for_observation(
-            #     #         a_obs, critic_hidden_state, dummy_first
-            #     #     )
-            #     #     values.append(v_prediction)
-
-            #     #     agent_state = new_agent_state
-            #     #     critic_state = new_critic_state
-
-            #     # action_log_probs = th.stack(action_log_probs).to(self.device)
-            #     # values = th.stack(values).to(self.device)
-
-            #     ratios = (action_log_probs - old_log_probs_batch).exp()
-            #     advantages = normalize(
-            #         (rewards_batch - old_values_batch.detach())
-            #     )
-            #     surr1 = ratios * advantages
-            #     surr2 = ratios.clamp(1 - self.clip, 1 + self.clip) * advantages
-            #     policy_loss = -th.min(surr1, surr2)  # - self.betas  # * entropy
-
-            #     update_network_(policy_loss, self.agent_optim)
-
-            #     value_loss = clipped_value_loss(
-            #         values,
-            #         rewards_batch,
-            #         old_values_batch,
-            #         self.value_clip,
-            #     )
-
-            #     update_network_(value_loss, self.critic_optim)
+                print(f"Policy loss: {batch_policy_loss}, Value loss: {batch_value_loss}")
 
     def learn_aux(self, aux_memories):
         # Gather states and target values into one tensor
@@ -430,3 +398,20 @@ class PPG:
 
         # The proposed auxiliary phase training
         pass
+
+
+def create_fixed_length_segments(frames, rewards, segment_length):
+    segments = []
+    num_segments = len(frames) // segment_length
+
+    for i in range(num_segments):
+        segment = Segment()
+        start_index = i * segment_length
+        end_index = start_index + segment_length
+
+        for j in range(start_index, end_index):
+            segment.add_frame(frames[j], rewards[j])
+
+        segments.append(segment)
+
+    return segments

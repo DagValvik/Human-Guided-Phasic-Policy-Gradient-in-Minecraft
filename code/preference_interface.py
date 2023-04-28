@@ -1,4 +1,5 @@
-from queue import Queue
+import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -10,7 +11,7 @@ class PreferenceInterface:
     to choose the preferred one. The user's choice is put in a preference queue.
     """
 
-    def __init__(self, segment_queue: Queue, pref_queue: Queue):
+    def __init__(self, segment_queue: deque, pref_queue: deque):
         """
         :param segment_queue: The segment queue to get segments from
         :param pref_queue: The preference queue to put the user's preferences in
@@ -25,19 +26,34 @@ class PreferenceInterface:
         """
         raise NotImplementedError
 
-    def run(self):
+    def add_segment(self, segment):
         """
-        Run the preference interface.
+        Add a segment to the segment queue.
+        :param segment: The segment to add
         """
-        while True:
+        self.segment_queue.append(segment)
+
+    def add_segments(self, segments):
+        """
+        Add multiple segments to the segment queue.
+        :param segments: The segments to add
+        """
+        self.segment_queue.extend(segments)
+
+    def get_preferences(self):
+        """
+        Get the user's preferences.
+        """
+        while len(self.segment_queue) > 1:
+            # TODO: Get random segments from the segment queue (now we just get first and last)
             # Get a segment from the segment queue
-            s1 = self.segment_queue.get(block=True)
-            # Get anothersegment from the segment queue
-            s2 = self.segment_queue.get(block=True)
+            s1 = self.segment_queue.pop()
+            # Get another segment from the segment queue
+            s2 = self.segment_queue.popleft()
             # Show the user the segment pair
             pref = self.show_segment_pair(s1, s2)
             # Put the user's preference in the preference queue
-            self.pref_queue.put((s1, s2, pref))
+            self.pref_queue.append((s1, s2, pref))
 
     def show_segment_pair(self, s1, s2):
         """
@@ -49,15 +65,20 @@ class PreferenceInterface:
         # Combine the two segments horizontally
         combined_frames = []
         for f1, f2 in zip(s1.frames, s2.frames):
-            combined_frame = np.hstack((f1.numpy(), f2.numpy()))
+            f1 = cv2.cvtColor(np.squeeze(f1), cv2.COLOR_RGB2BGR)
+            f2 = cv2.cvtColor(np.squeeze(f2), cv2.COLOR_RGB2BGR)
+            combined_frame = np.hstack((f1, f2))
             combined_frames.append(combined_frame)
 
-        # Show the combined video
-        for frame in combined_frames:
-            cv2.imshow("Segment Pair", frame)
-            key = cv2.waitKey(1000 // 30)  # Assuming 30 FPS
-            if key != -1:
-                break
+        key = -1
+        # Loop the segments until the user presses a key
+        while key == -1:
+            # Show the combined video
+            for frame in combined_frames:
+                cv2.imshow("Segment Pair", frame)
+                key = cv2.waitKey(1000 // 30)  # Assuming 30 FPS
+                if key != -1:
+                    break
 
         cv2.destroyAllWindows()
 
