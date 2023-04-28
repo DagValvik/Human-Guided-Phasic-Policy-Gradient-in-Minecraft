@@ -50,9 +50,10 @@ def update_network_(loss, optimizer, retain_graph=False):
     optimizer.zero_grad()
     loss.mean().backward(retain_graph=retain_graph)
     optimizer.step()
-    
+
+
 def clipped_value_loss(values, rewards, old_values, clip):
     value_clipped = old_values + (values - old_values).clamp(-clip, clip)
-    value_loss_1 = (value_clipped.flatten() - rewards) ** 2
-    value_loss_2 = (values.flatten() - rewards) ** 2
+    value_loss_1 = (value_clipped.squeeze() - rewards) ** 2
+    value_loss_2 = (values.squeeze() - rewards) ** 2
     return torch.mean(torch.max(value_loss_1, value_loss_2))
