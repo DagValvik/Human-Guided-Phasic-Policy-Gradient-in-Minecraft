@@ -54,6 +54,7 @@ def main(
         lam=0.95,
         clip=0.2,
         value_clip=0.2,
+        beta_s=0.1,
     )
 
     ppg.train(

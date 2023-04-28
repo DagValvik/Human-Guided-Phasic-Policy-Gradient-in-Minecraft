@@ -36,6 +36,7 @@ class PPG:
         minibatch_size,
         lr,
         betas,
+        beta_s,
         gamma,
         lam,
         clip,
@@ -46,6 +47,7 @@ class PPG:
         self.minibatch_size = minibatch_size
         self.lr = lr
         self.betas = betas
+        self.beta_s = beta_s
         self.gamma = gamma
         self.lam = lam
         self.clip = clip
@@ -79,6 +81,11 @@ class PPG:
             critic_params,
             lr=self.lr,
             betas=self.betas,
+        )
+
+        # Create original agent for kl divergence
+        self.original_agent = create_agent(
+            env_name, agent_policy_kwargs, agent_pi_head_kwargs, weights
         )
 
         # TODO: Implement scheduler
@@ -301,6 +308,7 @@ class PPG:
             ) in dl:
                 log_probs = []
                 values = []
+                kl_divs = []
 
                 # Unstack the agent_obs_batch and actions_batch
                 obs_tensors = th.unbind(agent_obs_batch["img"])
@@ -343,8 +351,23 @@ class PPG:
                         pi_distribution, actions_batch
                     )
 
+                    with th.no_grad():
+                        (
+                            original_pi_distribution,
+                            _,
+                            _,
+                        ) = self.original_agent.policy.get_output_for_observation(
+                            agent_obs_batch, agent_hidden_states, dummy_first
+                        )
+
+                    # Calculate KL divergence
+                    kl_div = self.agent.policy.pi_head.kl_divergence(
+                        pi_distribution, original_pi_distribution
+                    )
+
                     values.append(v_prediction)
                     log_probs.append(action_log_prob)
+                    kl_divs.append(kl_div)
 
                     # Update hidden states for the next iteration
                     next_agent_hidden_state = tree_map(
@@ -359,6 +382,13 @@ class PPG:
                 # Stack the values and log_probs
                 values = th.stack(values).to(self.device)
                 log_probs = th.stack(log_probs).to(self.device)
+                # TODO: use kl_divs and check if it is needed/correct
+                kl_divs = th.stack(kl_divs).to(self.device).mean()
+
+                # Calculate entropy
+                entropy = self.agent.policy.pi_head.entropy(pi_distribution).to(
+                    self.device
+                )
 
                 ratios = (log_probs - old_log_probs_batch).exp()
                 advantages = normalize(
@@ -366,7 +396,9 @@ class PPG:
                 )
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(1 - self.clip, 1 + self.clip) * advantages
-                policy_loss = -th.min(surr1, surr2)  # - self.betas  # * entropy
+                policy_loss = (
+                    -th.min(surr1, surr2) - self.beta_s * entropy
+                )  # - self.kl_beta * kl_divs
                 batch_policy_loss = policy_loss.mean().item()
                 update_network_(policy_loss, self.agent_optim)
 
@@ -380,7 +412,9 @@ class PPG:
 
                 update_network_(value_loss, self.critic_optim)
 
-                print(f"Policy loss: {batch_policy_loss}, Value loss: {batch_value_loss}")
+                print(
+                    f"Policy loss: {batch_policy_loss}, Value loss: {batch_value_loss}"
+                )
 
     def learn_aux(self, aux_memories):
         # Gather states and target values into one tensor
