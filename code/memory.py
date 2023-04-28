@@ -1,4 +1,5 @@
 from collections import namedtuple
+from typing import List
 
 from torch.utils.data import DataLoader, Dataset
 
@@ -32,3 +33,6 @@ class ExperienceDataset(Dataset):
 def create_dataloader(data, batch_size):
     dataset = ExperienceDataset(data)
     return DataLoader(dataset, batch_size=batch_size, shuffle=False)
+
+
+Episode = List[Memory]

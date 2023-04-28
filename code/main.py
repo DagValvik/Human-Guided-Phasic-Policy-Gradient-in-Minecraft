@@ -54,10 +54,11 @@ def main(
         num_episodes=500000,
         max_timesteps=500,
         render=False,
-        update_timesteps=500,
+        num_policy_updates_per_preference_update=1,
         num_policy_updates_per_aux=32,
         render_every_eps=250,
         save_every=1000,
+        n_rollouts=1,
     )
 
 

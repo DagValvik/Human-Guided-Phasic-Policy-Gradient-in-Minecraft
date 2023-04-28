@@ -1,4 +1,5 @@
 from collections import deque
+from typing import Deque
 
 import gym
 import numpy as np
@@ -11,7 +12,7 @@ from helpers import (
     normalize,
     update_network_,
 )
-from memory import AuxMemory, Memory, create_dataloader
+from memory import AuxMemory, Episode, Memory, create_dataloader
 
 # from memory import AuxMemory, Memory
 from openai_vpt.lib.tree_util import tree_map
@@ -86,12 +87,12 @@ class PPG:
         th.save(self.agent.policy.state_dict(), self.out_weights)
         print(f"Saved model weights to {self.out_weights}")
 
-    def collect_episodes(self, num_episodes_to_collect, max_timesteps, env):
-        all_episodes_memories = []
+    def collect_episodes(
+        self, memories, num_episodes_to_collect, max_timesteps, env
+    ):
         inital_hidden_states = {"agent": [], "critic": []}
-
         for _ in range(num_episodes_to_collect):
-            episode_memories = deque([])
+            episode = []
             obs = env.reset()
             dummy_first = th.from_numpy(np.array((False,))).to(self.device)
             # Reset the hidden state for the policy
@@ -145,8 +146,7 @@ class PPG:
                         next_value,
                     )
 
-                    episode_memories.append(memory)
-
+                    episode.append(memory)
                     break
 
                 memory = Memory(
@@ -159,14 +159,14 @@ class PPG:
                     None,
                 )
 
-                episode_memories.append(memory)
+                episode.append(memory)
 
                 # Update the hidden state for the next timestep
                 agent_hidden_state = new_agent_state
                 critic_hidden_state = new_critic_state
                 obs = next_obs
-            all_episodes_memories.append(episode_memories)
-        return all_episodes_memories, inital_hidden_states
+            memories.append(episode)
+        return inital_hidden_states
 
     def train(
         self,
@@ -175,35 +175,44 @@ class PPG:
         render,
         render_every_eps,
         save_every,
-        update_timesteps,
+        num_policy_updates_per_preference_update,
         num_policy_updates_per_aux,
+        n_rollouts,
     ):
         env = gym.make(self.env_name)
 
-        memories = deque([])
+        memories: Deque[Episode] = deque([])
         aux_memories = deque([])
         num_policy_updates = 0
 
         for eps in tqdm(range(num_episodes), desc="episodes"):
             render_eps = render and eps % render_every_eps == 0
 
-            (
-                all_episodes_memories,
-                initial_hidden_states,
-            ) = self.collect_episodes(1, max_timesteps, env)
+            initial_hidden_states = self.collect_episodes(
+                memories, n_rollouts, max_timesteps, env
+            )
 
             # Perform learning for each episode's memories
-            for episode_id, episode_memories in enumerate(
-                all_episodes_memories
-            ):
+            for episode_id, episode in enumerate(memories):
                 self.learn(
-                    episode_memories,
+                    episode,
                     aux_memories,
                     initial_hidden_states,
                     episode_id,
                 )
 
                 num_policy_updates += 1
+
+                if (
+                    num_policy_updates
+                    % num_policy_updates_per_preference_update
+                    == 0
+                ):
+                    # ask user for preferences on seqments
+                    # update reward predictor
+
+                    memories.clear()
+                    pass
 
                 # Perform auxiliary learning if required
                 if num_policy_updates % num_policy_updates_per_aux == 0:
