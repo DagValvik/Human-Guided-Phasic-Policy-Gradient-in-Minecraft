@@ -57,3 +57,18 @@ def clipped_value_loss(values, rewards, old_values, clip):
     value_loss_1 = (value_clipped.squeeze() - rewards) ** 2
     value_loss_2 = (values.squeeze() - rewards) ** 2
     return torch.mean(torch.max(value_loss_1, value_loss_2))
+
+
+def calculate_gae(rewards, values, masks, gamma, lam):
+    """
+    Calculate the generalized advantage estimate
+    """
+    gae = 0
+    returns = []
+
+    for step in reversed(range(len(rewards))):
+        next_value = values[step + 1] if step < len(rewards) - 1 else 0
+        delta = rewards[step] + gamma * next_value * masks[step] - values[step]
+        gae = delta + gamma * lam * masks[step] * gae
+        returns.insert(0, gae + values[step])
+    return returns

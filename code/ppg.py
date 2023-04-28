@@ -1,13 +1,10 @@
-import os
-import random
-import sys
 from collections import deque
 
 import gym
 import numpy as np
 import torch as th
-import torch.nn.functional as F
 from helpers import (
+    calculate_gae,
     clipped_value_loss,
     create_agent,
     load_model_parameters,
@@ -18,8 +15,6 @@ from memory import AuxMemory, Memory, create_dataloader
 
 # from memory import AuxMemory, Memory
 from openai_vpt.lib.tree_util import tree_map
-from torch import nn
-from torch.distributions import Categorical
 from torch.optim import Adam
 from tqdm import tqdm
 
@@ -55,6 +50,7 @@ class PPG:
         self.env_name = env_name
         self.reward_predictor = reward_predictor
         self.device = device
+        self.out_weights = out_weights
 
         # Load model parameters and create agents
         agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(model)
@@ -83,52 +79,12 @@ class PPG:
 
         # TODO: Implement scheduler
 
-    def policy(self):
-        """
-        Returns the policy network head, aux value head, and base
-        """
-
-        return (
-            self.agent.policy.pi_head,
-            self.agent.policy.value_head,
-            self.agent.policy.net,
-        )
-
-    def value(self):
-        """
-        Return the current value network  head and base
-        """
-        return self.critic.policy.value_head, self.critic.policy.net
-
-    def pi_and_v(
-        self,
-        agent_obs,
-        policy_hidden_state,
-        value_hidden_state,
-        dummy_first,
-        use_aux=False,
-    ):
-        """
-        Returns the correct policy and value outputs
-        """
-        # Shorthand for networks
-        policy, aux, policy_base = self.policy()
-        value, value_base = self.value()
-
-        (pi_h, aux_head), p_state_out = policy_base(
-            agent_obs, policy_hidden_state, context={"first": dummy_first}
-        )
-        (_, v_h), v_state_out = value_base(
-            agent_obs, value_hidden_state, context={"first": dummy_first}
-        )
-
-        if not use_aux:
-            return policy(pi_h), value(v_h), p_state_out, v_state_out
-        return policy(pi_h), value(v_h), aux(aux_head), p_state_out, v_state_out
-
     def save(self):
-        # Save the main agent and auxiliary agent models
-        pass
+        """
+        Saves the model weights to out_weights path
+        """
+        th.save(self.agent.policy.state_dict(), self.out_weights)
+        print(f"Saved model weights to {self.out_weights}")
 
     def collect_episodes(self, num_episodes_to_collect, max_timesteps, env):
         all_episodes_memories = []
@@ -273,7 +229,7 @@ class PPG:
         next_value = memories[-1].next_value
         values = values + [next_value]
 
-        returns = self.calculate_gae(
+        returns = calculate_gae(
             rewards,
             values,
             masks,
@@ -297,8 +253,13 @@ class PPG:
 
         # Policy phase training (PPO)
         for _ in range(self.epochs):
-            agent_hidden_states = initial_hidden_states["agent"][episode_id]
-            critic_hidden_state = initial_hidden_states["critic"][episode_id]
+            agent_hidden_states = tree_map(
+                lambda x: x.detach(), initial_hidden_states["agent"][episode_id]
+            )
+            critic_hidden_state = tree_map(
+                lambda x: x.detach(),
+                initial_hidden_states["critic"][episode_id],
+            )
 
             dummy_first = th.from_numpy(np.array((False,))).to(self.device)
 
@@ -366,7 +327,7 @@ class PPG:
 
                 ratios = (log_probs - old_log_probs_batch).exp()
                 advantages = normalize(
-                    rewards_batch - old_values_batch.detach()
+                    rewards_batch.detach() - old_values_batch.detach()
                 )
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(1 - self.clip, 1 + self.clip) * advantages
@@ -446,6 +407,13 @@ class PPG:
 
     def learn_aux(self, aux_memories):
         # Gather states and target values into one tensor
+        agent_observations = [aux.agent_obs for aux in aux_memories]
+        rewards = [aux.rewards for aux in aux_memories]
+        old_values = [aux.old_values for aux in aux_memories]
+
+        agent_observations = th.cat(agent_observations)
+        rewards = th.cat(rewards)
+        old_values = th.cat(old_values)
 
         # Get old action predictions for minimizing kl divergence and clipping respectively
 
@@ -453,31 +421,3 @@ class PPG:
 
         # The proposed auxiliary phase training
         pass
-
-    def calculate_gae(self, rewards, values, masks, gamma, lam):
-        """
-        Calculate the generalized advantage estimate
-        """
-        gae = 0
-        returns = []
-
-        for step in reversed(range(len(rewards))):
-            next_value = values[step + 1] if step < len(rewards) - 1 else 0
-            delta = (
-                rewards[step] + gamma * next_value * masks[step] - values[step]
-            )
-            gae = delta + gamma * lam * masks[step] * gae
-            returns.insert(0, gae + values[step])
-        return returns
-
-
-def batch_agent_obs(agent_obs_list):
-    keys = agent_obs_list[0].keys()
-    batched_agent_obs = {}
-
-    for key in keys:
-        batched_agent_obs[key] = th.stack(
-            [agent_obs[key] for agent_obs in agent_obs_list]
-        )
-
-    return batched_agent_obs
