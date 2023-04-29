@@ -12,13 +12,14 @@ from helpers import create_agent, load_model_parameters
 from openai_vpt.agent import PI_HEAD_KWARGS, MineRLAgent
 from openai_vpt.lib.tree_util import tree_map
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+from torch.utils.tensorboard import SummaryWriter
 
-EPOCHS = 2
-BATCH_SIZE = 16
-N_WORKERS = 24
+EPOCHS = 2  # OpenAI VPT Paper
+BATCH_SIZE = 16  # OpenAI VPT Paper
+N_WORKERS = 24  # Should be more than batch size
 DEVICE = "cuda"
 
-LOSS_REPORT_RATE = 100
+LOSS_REPORT_RATE = 100  # also lr scheduler step rate (in batches)
 LEARNING_RATE = 0.000181  # OpenAI VPT Paper
 WEIGHT_DECAY = 0.039428  # OpenAI VPT Paper
 # WEIGHT_DECAY = 0.0
@@ -53,9 +54,9 @@ def behavior_cloning_train(
     optimizer = th.optim.Adam(
         trainable_parameters, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
-    lr_scheduler = ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.1, patience=10, verbose=True
-    )
+    # lr_scheduler = ReduceLROnPlateau(
+    #     optimizer, mode="min", factor=0.1, patience=10, verbose=True
+    # )
 
     # Initialize data loader
     data_loader = DataLoader(
@@ -64,6 +65,9 @@ def behavior_cloning_train(
         batch_size=BATCH_SIZE,
         n_epochs=EPOCHS,
     )
+
+    # Create the writer
+    writer = SummaryWriter()
 
     # Training loop
     start_time = time.time()
@@ -138,17 +142,22 @@ def behavior_cloning_train(
             print(
                 f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {avg_loss:.4f} "
             )
+            # Log the loss values
+            writer.add_scalar("Loss/train", avg_loss, batch_i)
 
-            # Update learning rate scheduler
-            lr_scheduler.step(avg_loss)
+            # # Update learning rate scheduler
+            # lr_scheduler.step(avg_loss)
 
             loss_sum = 0
 
         # Save the model every SAVE_EVERY batches
         if batch_i % SAVE_EVERY == 0 and batch_i > 0:
+            base_name = os.path.basename(out_weights)
+            # remove the .weights extension
+            base_name = os.path.splitext(base_name)[0]
             intermediate_weights_path = os.path.join(
                 os.path.dirname(out_weights),
-                f"intermediate_weights_batch_{batch_i}.weights",
+                f"{base_name}_{batch_i}.weights",
             )
             th.save(policy.state_dict(), intermediate_weights_path)
             print(f"Saved intermediate weights to {intermediate_weights_path}")
