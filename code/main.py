@@ -48,6 +48,7 @@ def main(
         epochs=1,
         epochs_aux=6,
         minibatch_size=32,
+        max_grad_norm=5,
         lr=2e-5,
         betas=(0.9, 0.999),
         gamma=0.99,

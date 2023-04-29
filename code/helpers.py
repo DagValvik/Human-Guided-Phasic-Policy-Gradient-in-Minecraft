@@ -46,9 +46,10 @@ def normalize(t, eps=1e-5):
     return (t - t.mean()) / (t.std() + eps)
 
 
-def update_network_(loss, optimizer, retain_graph=False):
+def update_network_(loss, optimizer, policy, max_grad_norm=0.5):
     optimizer.zero_grad()
-    loss.mean().backward(retain_graph=retain_graph)
+    loss.mean().backward()
+    torch.nn.utils.clip_grad_norm_(policy.parameters(), max_grad_norm)
     optimizer.step()
 
 

@@ -35,6 +35,7 @@ class PPG:
         epochs_aux,
         minibatch_size,
         lr,
+        max_grad_norm,
         betas,
         beta_s,
         gamma,
@@ -45,6 +46,7 @@ class PPG:
         self.epochs = epochs
         self.epochs_aux = epochs_aux
         self.minibatch_size = minibatch_size
+        self.max_grad_norm = max_grad_norm
         self.lr = lr
         self.betas = betas
         self.beta_s = beta_s
@@ -346,7 +348,7 @@ class PPG:
                         dummy_first,
                     )
 
-                    # Calculate the log prob
+                    # Calculate the log prob1
                     action_log_prob = self.agent.policy.get_logprob_of_action(
                         pi_distribution, actions_batch
                     )
@@ -383,7 +385,7 @@ class PPG:
                 values = th.stack(values).to(self.device)
                 log_probs = th.stack(log_probs).to(self.device)
                 # TODO: use kl_divs and check if it is needed/correct
-                kl_divs = th.stack(kl_divs).to(self.device).mean()
+                kl_divs = th.stack(kl_divs).to(self.device)
 
                 # Calculate entropy
                 entropy = self.agent.policy.pi_head.entropy(pi_distribution).to(
@@ -396,11 +398,17 @@ class PPG:
                 )
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(1 - self.clip, 1 + self.clip) * advantages
+
                 policy_loss = (
                     -th.min(surr1, surr2) - self.beta_s * entropy
                 )  # - self.kl_beta * kl_divs
                 batch_policy_loss = policy_loss.mean().item()
-                update_network_(policy_loss, self.agent_optim)
+                update_network_(
+                    policy_loss,
+                    self.agent_optim,
+                    self.agent.policy,
+                    self.max_grad_norm,
+                )
 
                 value_loss = clipped_value_loss(
                     values,
@@ -410,7 +418,12 @@ class PPG:
                 )
                 batch_value_loss = value_loss.mean().item()
 
-                update_network_(value_loss, self.critic_optim)
+                update_network_(
+                    value_loss,
+                    self.critic_optim,
+                    self.critic.policy,
+                    self.max_grad_norm,
+                )
 
                 print(
                     f"Policy loss: {batch_policy_loss}, Value loss: {batch_value_loss}"
