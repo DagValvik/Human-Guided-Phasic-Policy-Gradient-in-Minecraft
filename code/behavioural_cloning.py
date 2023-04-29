@@ -11,6 +11,7 @@ from data_loader import DataLoader
 from helpers import create_agent, load_model_parameters
 from openai_vpt.agent import PI_HEAD_KWARGS, MineRLAgent
 from openai_vpt.lib.tree_util import tree_map
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 EPOCHS = 2
 BATCH_SIZE = 16
@@ -23,7 +24,7 @@ WEIGHT_DECAY = 0.039428  # OpenAI VPT Paper
 # WEIGHT_DECAY = 0.0
 KL_LOSS_WEIGHT = 1.0
 MAX_GRAD_NORM = 5.0
-MAX_BATCHES = 40000  # Max number of batches to train for
+SAVE_EVERY = 1000
 
 
 def behavior_cloning_train(
@@ -47,13 +48,13 @@ def behavior_cloning_train(
     policy = agent.policy
     original_policy = original_agent.policy
 
-    # Freeze most params if using small dataset
-    trainable_layers = [policy.net.lastlayer, policy.pi_head]
-    trainable_parameters = policy.parameters()
-
     # Set up optimizer and learning rate scheduler
+    trainable_parameters = policy.parameters()
     optimizer = th.optim.Adam(
         trainable_parameters, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
+    )
+    lr_scheduler = ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.1, patience=10, verbose=True
     )
 
     # Initialize data loader
@@ -80,9 +81,9 @@ def behavior_cloning_train(
             if image is None and action is None:
                 # A work-item was done. Remove hidden state
                 if episode_id in episode_hidden_states:
-                    removed_hidden_state = episode_hidden_states.pop(episode_id)
-                    del removed_hidden_state
+                    del episode_hidden_states[episode_id]
                     continue
+
             agent_action = agent._env_action_to_agent(
                 action, to_torch=True, check_if_null=True
             )
@@ -119,14 +120,9 @@ def behavior_cloning_train(
                 pi_distribution, original_pi_distribution
             )
 
-            # Make sure we do not try to backprop through sequence
-            # (fails with current accumulation)
             new_agent_state = tree_map(lambda x: x.detach(), new_agent_state)
             episode_hidden_states[episode_id] = new_agent_state
 
-            # Finally, update the agent to increase the probability of the
-            # taken action.
-            # Remember to take mean over batch losses
             loss = (-log_prob + KL_LOSS_WEIGHT * kl_div) / BATCH_SIZE
             batch_loss += loss.item()
             loss.backward()
@@ -136,12 +132,26 @@ def behavior_cloning_train(
         optimizer.zero_grad()
 
         loss_sum += batch_loss
-        if batch_i % LOSS_REPORT_RATE == 0:
+        if batch_i % LOSS_REPORT_RATE == 0 and batch_i > 0:
             time_since_start = time.time() - start_time
+            avg_loss = loss_sum / LOSS_REPORT_RATE
             print(
-                f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {loss_sum / LOSS_REPORT_RATE:.4f} "
+                f"Time: {time_since_start:.2f}, Batches: {batch_i}, Avrg loss: {avg_loss:.4f} "
             )
+
+            # Update learning rate scheduler
+            lr_scheduler.step(avg_loss)
+
             loss_sum = 0
+
+        # Save the model every SAVE_EVERY batches
+        if batch_i % SAVE_EVERY == 0 and batch_i > 0:
+            intermediate_weights_path = os.path.join(
+                os.path.dirname(out_weights),
+                f"intermediate_weights_batch_{batch_i}.weights",
+            )
+            th.save(policy.state_dict(), intermediate_weights_path)
+            print(f"Saved intermediate weights to {intermediate_weights_path}")
 
     # Save the finetuned weights
     state_dict = policy.state_dict()
