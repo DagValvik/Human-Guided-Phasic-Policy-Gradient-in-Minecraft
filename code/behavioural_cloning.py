@@ -28,79 +28,74 @@ WEIGHT_DECAY = 0.001  # also try 0.001 and 0.001 or 0 (no weight decay)
 KL_LOSS_WEIGHT = 1.0
 MAX_GRAD_NORM = 5.0
 SAVE_EVERY = 10000
-VALIDATION_RATE = 10000
-VALIDATION_BATCHES = 1000
 
+# Validation (doesn't work yet, Queue problems)
+# VALIDATION_RATE = 1000
+# VALIDATION_BATCHES = VALIDATION_RATE // 10
+# def validate_model(
+#     validation_data_loader, agent, policy, original_policy, n_batches
+# ):
+#     episode_hidden_states = {}
+#     dummy_first = th.from_numpy(np.array((False,))).to(DEVICE)
+#     validation_loss_sum = 0
+#     validation_steps = 0
 
-def validate_model(data_dir, policy, original_policy, n_batches):
-    validation_data_loader = DataLoader(
-        dataset_dir=os.path.join(data_dir, "val"),
-        n_workers=N_WORKERS,
-        batch_size=BATCH_SIZE,
-        n_epochs=1,  # Set to 1, as we will control the validation frequency in the script
-    )
+#     for batch_images, batch_actions, batch_episode_id in itertools.islice(
+#         validation_data_loader, n_batches
+#     ):
+#         batch_loss = 0
+#         for image, action, episode_id in zip(
+#             batch_images, batch_actions, batch_episode_id
+#         ):
+#             if image is None and action is None:
+#                 if episode_id in episode_hidden_states:
+#                     del episode_hidden_states[episode_id]
+#                 continue
 
-    episode_hidden_states = {}
-    dummy_first = th.from_numpy(np.array((False,))).to(DEVICE)
-    validation_loss_sum = 0
-    validation_steps = 0
+#             agent_action = agent._env_action_to_agent(
+#                 action, to_torch=True, check_if_null=True
+#             )
+#             if agent_action is None:
+#                 continue
 
-    for batch_images, batch_actions, batch_episode_id in itertools.islice(
-        validation_data_loader, n_batches
-    ):
-        batch_loss = 0
-        for image, action, episode_id in zip(
-            batch_images, batch_actions, batch_episode_id
-        ):
-            if image is None and action is None:
-                if episode_id in episode_hidden_states:
-                    del episode_hidden_states[episode_id]
-                continue
+#             agent_obs = agent._env_obs_to_agent({"pov": image})
+#             if episode_id not in episode_hidden_states:
+#                 episode_hidden_states[episode_id] = policy.initial_state(1)
+#             agent_state = episode_hidden_states[episode_id]
 
-            agent_action = policy._env_action_to_agent(
-                action, to_torch=True, check_if_null=True
-            )
-            if agent_action is None:
-                continue
+#             with th.no_grad():
+#                 (
+#                     pi_distribution,
+#                     _,
+#                     new_agent_state,
+#                 ) = policy.get_output_for_observation(
+#                     agent_obs, agent_state, dummy_first
+#                 )
+#                 (
+#                     original_pi_distribution,
+#                     _,
+#                     _,
+#                 ) = original_policy.get_output_for_observation(
+#                     agent_obs, agent_state, dummy_first
+#                 )
 
-            agent_obs = policy._env_obs_to_agent({"pov": image})
-            if episode_id not in episode_hidden_states:
-                episode_hidden_states[episode_id] = policy.initial_state(1)
-            agent_state = episode_hidden_states[episode_id]
+#             log_prob = policy.get_logprob_of_action(
+#                 pi_distribution, agent_action
+#             )
+#             kl_div = policy.get_kl_of_action_dists(
+#                 pi_distribution, original_pi_distribution
+#             )
 
-            with th.no_grad():
-                (
-                    pi_distribution,
-                    _,
-                    new_agent_state,
-                ) = policy.get_output_for_observation(
-                    agent_obs, agent_state, dummy_first
-                )
-                (
-                    original_pi_distribution,
-                    _,
-                    _,
-                ) = original_policy.get_output_for_observation(
-                    agent_obs, agent_state, dummy_first
-                )
+#             new_agent_state = tree_map(lambda x: x.detach(), new_agent_state)
+#             episode_hidden_states[episode_id] = new_agent_state
 
-            log_prob = policy.get_logprob_of_action(
-                pi_distribution, agent_action
-            )
-            kl_div = policy.get_kl_of_action_dists(
-                pi_distribution, original_pi_distribution
-            )
+#             loss = (-log_prob + KL_LOSS_WEIGHT * kl_div) / BATCH_SIZE
+#             batch_loss += loss.item()
 
-            new_agent_state = tree_map(lambda x: x.detach(), new_agent_state)
-            episode_hidden_states[episode_id] = new_agent_state
+#         validation_loss_sum += batch_loss
+#         validation_steps += 1
 
-            loss = (-log_prob + KL_LOSS_WEIGHT * kl_div) / BATCH_SIZE
-            batch_loss += loss.item()
-
-        validation_loss_sum += batch_loss
-        validation_steps += 1
-
-    return validation_loss_sum / validation_steps
+#     return validation_loss_sum / validation_steps
 
 
 def behavior_cloning_train(
@@ -125,13 +120,19 @@ def behavior_cloning_train(
     optimizer = th.optim.Adam(
         trainable_parameters, lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY
     )
+    # validation_data_loader = DataLoader(
+    #     dataset_dir=os.path.join(data_dir, "val"),
+    #     n_workers=N_WORKERS,
+    #     batch_size=BATCH_SIZE,
+    #     n_epochs=1,  # Set to 1, as we will control the validation frequency in the script
+    # )
 
     # patience = 10 means that if the validation loss does not improve over 10 x LOSS_REPORT_RATE batches, we reduce the LR
     # 1000 batches might be too little, but we'll see
     # factor = 0.1 reduces the LR too much, and loss starts to increase again
     # maybe try factor = 0.9 with patience = 100
     lr_scheduler = ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=2, verbose=True
+        optimizer, mode="min", factor=0.8, patience=100, verbose=True
     )
 
     # Create the writer
@@ -217,33 +218,29 @@ def behavior_cloning_train(
             optimizer.zero_grad()
 
             loss_sum += batch_loss
+
             if batch_i % LOSS_REPORT_RATE == 0 and batch_i > 0:
-                time_since_start = time.time() - start_time
                 avg_loss = loss_sum / LOSS_REPORT_RATE
+                # validation_loss = validate_model(
+                #     validation_data_loader,
+                #     agent,
+                #     policy,
+                #     original_policy,
+                #     VALIDATION_BATCHES,
+                # )
+                time_since_start = time.time() - start_time
                 print(
-                    f"[INFO] Epoch: {epoch} | Time: {time_since_start:.2f}, Batches: {batch_i}, Train loss: {avg_loss:.4f} "
+                    f"[INFO] Epoch: {epoch} | Time: {time_since_start:.2f} | Batches: {batch_i} | Train loss: {avg_loss:.4f}"  # | Val loss: {avg_loss:.4f} "
                 )
                 # Log the loss values
                 writer.add_scalar("Loss/train", avg_loss, batch_i)
-
-                loss_sum = 0
-
-            if batch_i % VALIDATION_RATE == 0 and batch_i > 0:
-                validation_loss = validate_model(
-                    data_dir,
-                    policy,
-                    original_policy,
-                    VALIDATION_BATCHES,
-                )
-                time_since_start = time.time() - start_time
-                print(
-                    f"[INFO] Epoch: {epoch} | Time: {time_since_start:.2f}, Batches: {batch_i}, Val loss: {avg_loss:.4f} "
-                )
                 # Log the validation loss
-                writer.add_scalar("Loss/validation", validation_loss, batch_i)
+                # writer.add_scalar("Loss/validation", validation_loss, batch_i)
 
                 # Update learning rate scheduler
-                lr_scheduler.step(validation_loss)
+                lr_scheduler.step(avg_loss)
+
+                loss_sum = 0
 
             # Save the model every SAVE_EVERY batches
             if batch_i % SAVE_EVERY == 0 and batch_i > 0:
