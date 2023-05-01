@@ -1,4 +1,4 @@
-import time
+import random
 from collections import deque
 
 import cv2
@@ -11,13 +11,14 @@ class PreferenceInterface:
     to choose the preferred one. The user's choice is put in a preference queue.
     """
 
-    def __init__(self, segment_queue: deque, pref_queue: deque):
+    def __init__(self, segment_queue: list, pref_queue: deque):
         """
         :param segment_queue: The segment queue to get segments from
         :param pref_queue: The preference queue to put the user's preferences in
         """
         self.segment_queue = segment_queue
         self.pref_queue = pref_queue
+        self.task_name = "MineRLBasaltFindCave-v0"
 
     def shuffle_segment_queue(self):
         """
@@ -45,19 +46,16 @@ class PreferenceInterface:
         Get the user's preferences.
         """
         while len(self.segment_queue) > 1:
-            # TODO: Get random segments from the segment queue (now we just get first and last)
-            # Get a segment from the segment queue
-            s1 = self.segment_queue.pop()
-            # Get another segment from the segment queue
-            s2 = self.segment_queue.popleft()
+            # Sample random segments from the list
+            s1, s2 = random.sample(self.segment_queue, 2)
             # Show the user the segment pair
-            pref = self.show_segment_pair(s1, s2)
+            pref = self.get_user_preference(s1, s2)
             # Put the user's preference in the preference queue
             self.pref_queue.append((s1, s2, pref))
 
     def show_segment_pair(self, s1, s2):
         """
-        Show the user a segment pair and ask them to choose the preferred one.
+        Show the user a segment pair in a loop until the user presses a key.
         :param s1: The first segment
         :param s2: The second segment
         :return: The user's preference
@@ -75,21 +73,40 @@ class PreferenceInterface:
         while key == -1:
             # Show the combined video
             for frame in combined_frames:
-                cv2.imshow("Segment Pair", frame)
+                cv2.imshow(self.task_name, frame)
                 key = cv2.waitKey(1000 // 30)  # Assuming 30 FPS
                 if key != -1:
                     break
 
         cv2.destroyAllWindows()
 
+    def get_user_preference(self, s1, s2):
+        """
+        Get the user's preference between two segments.
+        :param s1: The first segment
+        :param s2: The second segment
+        :return: The user's preference
+        """
+        self.show_segment_pair(s1, s2)
+
+        # Print the instructions
+        print("Enter your preference:")
+        print("1 - First segment")
+        print("2 - Second segment")
+        print("3 - Equal preference")
+        print("4 - Incomparable")
+
         # Get the user's preference
         while True:
-            pref = input(
-                "Enter 1 for the first segment or 2 for the second segment: "
-            ).strip()
+            pref = input("Your choice: ").strip()
+
             if pref == "1":
-                return [1.0, 0.0]
+                return [1.0, 0.0]  # first segment preferred
             elif pref == "2":
-                return [0.0, 1.0]
+                return [0.0, 1.0]  # second segment preferred
+            elif pref == "3":
+                return [0.5, 0.5]  # equal preference
+            elif pref == "4":
+                return [-1.0, -1.0]  # incomparable preference
             else:
-                print("Invalid input. Please enter 1 or 2.")
+                print("Invalid input. Please enter 1, 2, 3, or 4.")

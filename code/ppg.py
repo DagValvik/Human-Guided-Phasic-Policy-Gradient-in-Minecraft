@@ -242,9 +242,8 @@ class PPG:
                 ):
                     # ask user for preferences on seqments
                     self.preference_interface.get_preferences()
-                    # update reward predictor22
-
-                    pass
+                    # update reward predictor with new preferences
+                    self.reward_predictor.train()
 
                 episode_id += 1
 

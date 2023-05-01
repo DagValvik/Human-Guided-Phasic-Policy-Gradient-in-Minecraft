@@ -81,7 +81,7 @@ class RewardPredictorNetwork(nn.Module):
         r = self.core(obs)
         return r.item()
 
-    def train_step(self, s1: Segment, s2, pref: list):
+    def train_step(self, s1: Segment, s2: Segment, pref: list):
         # Sum the rewards for each segment
         r1sum = sum(s1.rewards)
         r2sum = sum(s2.rewards)
@@ -111,22 +111,18 @@ class RewardPredictorNetwork(nn.Module):
 
     def train(self, max_iterations=None):
         iteration = 0
-        while True:
-            try:
-                # Get a segment pair from the preference queue if there is any
-                s1, s2, pref = self.pref_queue.get(timeout=1)
-                loss = self.train_step(s1, s2, pref)
-                logging.debug("Trained on preference %s", pref)
-                logging.debug("Loss: %f", loss)
+        while self.pref_queue:
+            s1, s2, pref = self.pref_queue.pop()
+            loss = self.train_step(s1, s2, pref)
+            print(
+                f"[INFO] Iteration {iteration} | Loss: {loss:.3f} | Pref: {pref}"
+            )
 
-                # Increment the iteration counter and break if the maximum number of iterations is reached
-                if max_iterations is not None:
-                    iteration += 1
-                    if iteration >= max_iterations:
-                        break
-            except queue.Empty:
-                # If the preference queue is empty, continue waiting for preferences
-                continue
+            # Increment the iteration counter and break if the maximum number of iterations is reached
+            if max_iterations is not None:
+                iteration += 1
+                if iteration >= max_iterations:
+                    break
 
     def save(self, path):
         torch.save(self.core.state_dict(), path)

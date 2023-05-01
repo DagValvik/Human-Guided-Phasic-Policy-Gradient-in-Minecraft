@@ -31,8 +31,8 @@ def main(
     """
     device = th.device(DEVICE if th.cuda.is_available() else "cpu")
 
-    preference_queue = deque(maxlen=100)
-    sequence_queue = deque(maxlen=100)
+    preference_queue = deque([])
+    sequence_queue = []
 
     reward_predictor = RewardPredictorNetwork(pref_queue=preference_queue)
     pref_interface = PreferenceInterface(sequence_queue, preference_queue)

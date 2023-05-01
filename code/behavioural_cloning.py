@@ -23,9 +23,12 @@ DEVICE = "cuda" if th.cuda.is_available() else "cpu"
 
 LOSS_REPORT_RATE = 100  # also lr scheduler step rate (in batches)
 LEARNING_RATE = 0.000181  # OpenAI VPT Paper
-# WEIGHT_DECAY = 0.039428  # OpenAI VPT Paper
-WEIGHT_DECAY = 0.001  # also try 0.001 and 0.001 or 0 (no weight decay)
-KL_LOSS_WEIGHT = 1.0
+WEIGHT_DECAY = 0.039428  # OpenAI VPT Paper
+# LEARNING_RATE = 2e-4
+# LR_PATIENCE = 1000
+# LR_FACTOR = 0.5
+# WEIGHT_DECAY = 0.001  # also try 0.01, 0.001  or 0 (no weight decay)
+# KL_LOSS_WEIGHT = 0.5
 MAX_GRAD_NORM = 5.0
 SAVE_EVERY = 10000
 
@@ -110,10 +113,10 @@ def behavior_cloning_train(
         in_weights,
     )
 
-    original_agent = copy.deepcopy(agent)
+    # original_agent = copy.deepcopy(agent)
 
     policy = agent.policy
-    original_policy = original_agent.policy
+    # original_policy = original_agent.policy
 
     # Set up optimizer and learning rate scheduler
     trainable_parameters = policy.parameters()
@@ -131,9 +134,13 @@ def behavior_cloning_train(
     # 1000 batches might be too little, but we'll see
     # factor = 0.1 reduces the LR too much, and loss starts to increase again
     # maybe try factor = 0.9 with patience = 100
-    lr_scheduler = ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.8, patience=100, verbose=True
-    )
+    # lr_scheduler = ReduceLROnPlateau(
+    #     optimizer,
+    #     mode="min",
+    #     factor=LR_FACTOR,
+    #     patience=LR_PATIENCE,
+    #     verbose=True,
+    # )
 
     # Create the writer
     writer = SummaryWriter()
@@ -188,28 +195,28 @@ def behavior_cloning_train(
                     agent_obs, agent_state, dummy_first
                 )
 
-                with th.no_grad():
-                    (
-                        original_pi_distribution,
-                        _,
-                        _,
-                    ) = original_policy.get_output_for_observation(
-                        agent_obs, agent_state, dummy_first
-                    )
+                # with th.no_grad():
+                #     (
+                #         original_pi_distribution,
+                #         _,
+                #         _,
+                #     ) = original_policy.get_output_for_observation(
+                #         agent_obs, agent_state, dummy_first
+                #     )
 
                 log_prob = policy.get_logprob_of_action(
                     pi_distribution, agent_action
                 )
-                kl_div = policy.get_kl_of_action_dists(
-                    pi_distribution, original_pi_distribution
-                )
+                # kl_div = policy.get_kl_of_action_dists(
+                #     pi_distribution, original_pi_distribution
+                # )
 
                 new_agent_state = tree_map(
                     lambda x: x.detach(), new_agent_state
                 )
                 episode_hidden_states[episode_id] = new_agent_state
 
-                loss = (-log_prob + KL_LOSS_WEIGHT * kl_div) / BATCH_SIZE
+                loss = (-log_prob) / BATCH_SIZE  # + KL_LOSS_WEIGHT * kl_div
                 batch_loss += loss.item()
                 loss.backward()
 
@@ -238,7 +245,7 @@ def behavior_cloning_train(
                 # writer.add_scalar("Loss/validation", validation_loss, batch_i)
 
                 # Update learning rate scheduler
-                lr_scheduler.step(avg_loss)
+                # lr_scheduler.step(avg_loss)
 
                 loss_sum = 0
 
