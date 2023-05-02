@@ -59,7 +59,7 @@ def main(
     )
 
     ppg.train(
-        num_episodes=500000,
+        n_iterations=500000,
         max_timesteps=500,
         render=False,
         num_policy_updates_per_preference_update=1,
