@@ -182,7 +182,7 @@ class PPG:
 
     def train(
         self,
-        num_episodes,
+        n_iterations,
         max_timesteps,
         render,
         render_every_eps,
@@ -197,7 +197,7 @@ class PPG:
         aux_memories = deque([])
         num_policy_updates = 0
 
-        for eps in tqdm(range(num_episodes), desc="episodes"):
+        for eps in tqdm(range(n_iterations), desc="iterations"):
             render_eps = render and eps % render_every_eps == 0
 
             initial_hidden_states = self.collect_episodes(
