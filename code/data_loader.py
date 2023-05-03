@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 from openai_vpt.agent import AGENT_RESOLUTION, resize_image
 
-QUEUE_TIMEOUT = 10
+QUEUE_TIMEOUT = 15
 
 CURSOR_FILE = os.path.join(
     os.path.dirname(__file__), "cursors", "mouse_cursor_white_16x16.png"
