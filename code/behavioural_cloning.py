@@ -11,7 +11,7 @@ import minerl
 import numpy as np
 import torch as th
 from data_loader import DataLoader
-from helpers import create_agent, load_model_parameters
+from helpers import create_agent, freeze_policy_layers, load_model_parameters
 from openai_vpt.agent import PI_HEAD_KWARGS, MineRLAgent
 from openai_vpt.lib.tree_util import tree_map
 from torch.optim.lr_scheduler import ReduceLROnPlateau
@@ -204,15 +204,34 @@ def behavior_cloning_train(
     max_batches=None,
     save_every=10000,
     save=True,
+    freeze_layers=False,
+    scheduler=False,
 ):
     policy = policy
     original_policy = original_policy
 
     # Set up optimizer and learning rate scheduler
-    trainable_parameters = policy.parameters()
+    if freeze_layers:
+        trainable_layers = [
+            policy.pi_head,
+            policy.net.lastlayer,
+        ]
+        trainable_parameters = freeze_policy_layers(policy, trainable_layers)
+    else:
+        trainable_parameters = policy.parameters()
     optimizer = th.optim.Adam(
         trainable_parameters, lr=learning_rate, weight_decay=weight_decay
     )
+
+    if scheduler:
+        lr_scheduler = th.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode="min",
+            factor=0.1,
+            patience=50,
+            verbose=True,
+            min_lr=1e-7,
+        )
 
     # Create the writer
     writer = SummaryWriter()
@@ -307,9 +326,12 @@ def behavior_cloning_train(
                 print(
                     f"[INFO] Epoch: {epoch} | Time: {time_since_start:.2f} | Batches: {batch_i} | Train loss: {avg_loss:.4f}"  # | Val loss: {avg_loss:.4f} "
                 )
-                # Log the loss values
-                writer.add_scalar("Loss/train", avg_loss, batch_i)
+                tag = "Loss/train" if not freeze_layers else "Loss/train/frozen"
+                if scheduler:
+                    lr_scheduler.step(avg_loss)
+                    tag = tag + " w/scheduler"
 
+                writer.add_scalar(tag, avg_loss, batch_i)
                 loss_sum = 0
 
             # Save the model every SAVE_EVERY batches
@@ -320,20 +342,52 @@ def behavior_cloning_train(
                 folder = os.path.join(os.path.dirname(out_weights), base_name)
                 if not os.path.exists(folder):
                     os.makedirs(folder)
+
+                filename = f"{base_name}_{batch_i}"
+                if scheduler:
+                    filename = filename + "_scheduler"
+                if freeze_layers:
+                    filename = filename + "_frozen"
+                filename = filename + ".weights"
+
                 intermediate_weights_path = os.path.join(
                     folder,
-                    f"{base_name}_{batch_i}.weights",
+                    filename,
                 )
                 th.save(policy.state_dict(), intermediate_weights_path)
                 print(
                     f"[INFO] Saved intermediate weights to {intermediate_weights_path}"
                 )
 
-        # Save the finetuned weights
+        # Save the finetuned weights to the output path folder every epoch
         if save:
             state_dict = policy.state_dict()
-            th.save(state_dict, out_weights)
-            print("[INFO] Saved weights to", out_weights)
+            base_name = os.path.basename(out_weights)
+            # remove the .weights extension
+            base_name = os.path.splitext(base_name)[0]
+            folder = os.path.join(os.path.dirname(out_weights), base_name)
+            if not os.path.exists(folder):
+                os.makedirs(folder)
+            
+            if scheduler:
+                base_name = base_name + "_scheduler"
+            if freeze_layers:
+                base_name = base_name + "_frozen"
+
+            weights_path = os.path.join(
+                folder,
+                base_name + ".weights",
+            )
+            th.save(state_dict, weights_path)
+            print(
+                f"[INFO] Saved intermediate weights to {weights_path}"
+            )
+
+    # Save the final weights to the output path
+    if save:
+        state_dict = policy.state_dict()
+        th.save(state_dict, out_weights)
+        print("[INFO] Saved weights to", out_weights)
 
 
 if __name__ == "__main__":

@@ -70,6 +70,8 @@ def main():
         max_grad_norm=MAX_GRAD_NORM,
         save=True,
         save_every=10000,
+        freeze_layers=False,
+        scheduler=True,
     )
 
 
