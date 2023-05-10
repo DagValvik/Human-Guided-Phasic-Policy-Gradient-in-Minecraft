@@ -1,6 +1,3 @@
-import logging
-import queue
-
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -43,7 +40,7 @@ class RewardPredictorCore(nn.Module):
         return nn.Sequential(*layers)
 
     def create_classifier(self):
-        input_shape = (3, 128, 128)
+        input_shape = (3, 256, 256)
         output_size = self.calculate_output_size(input_shape)
         layers = [
             nn.Linear(output_size, 64),

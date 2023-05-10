@@ -7,6 +7,7 @@ Memory = namedtuple(
     "Memory",
     [
         "agent_obs",
+        "obs",
         "action",
         "action_log_prob",
         "reward",
@@ -15,7 +16,10 @@ Memory = namedtuple(
         "next_value",
     ],
 )
-AuxMemory = namedtuple("Memory", ["agent_obs", "rewards", "old_values"])
+AuxMemory = namedtuple(
+    "Memory",
+    ["agent_obs", "rewards", "old_values"],
+)
 
 
 class ExperienceDataset(Dataset):

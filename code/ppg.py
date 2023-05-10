@@ -1,3 +1,4 @@
+import copy
 from collections import deque
 from typing import Deque
 
@@ -8,16 +9,20 @@ from helpers import (
     calculate_gae,
     clipped_value_loss,
     create_agent,
+    create_fixed_length_segments,
     load_model_parameters,
     normalize,
     update_network_,
 )
 from memory import AuxMemory, Episode, Memory, create_dataloader
+from openai_vpt.agent import resize_image
 
 # from memory import AuxMemory, Memory
 from openai_vpt.lib.tree_util import tree_map
-from segment import Segment
+from preference_interface import PreferenceInterface
+from reward_predict import RewardPredictorNetwork
 from torch.optim import Adam
+from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 
@@ -50,6 +55,7 @@ class PPG:
         self.lr = lr
         self.betas = betas
         self.beta_s = beta_s
+        self.kl_beta = 1.0
         self.gamma = gamma
         self.lam = lam
         self.clip = clip
@@ -67,9 +73,9 @@ class PPG:
         self.agent = create_agent(
             env_name, agent_policy_kwargs, agent_pi_head_kwargs, weights
         )
-        self.critic = create_agent(
-            env_name, agent_policy_kwargs, agent_pi_head_kwargs, weights
-        )
+
+        self.critic = copy.deepcopy(self.agent)
+
         self.agent_optim = Adam(
             self.agent.policy.parameters(),
             lr=self.lr,
@@ -85,12 +91,14 @@ class PPG:
             betas=self.betas,
         )
 
-        # Create original agent for kl divergence
-        self.original_agent = create_agent(
-            env_name, agent_policy_kwargs, agent_pi_head_kwargs, weights
-        )
+        # Create original agent for kl divergence (not sure if this is necessary)
+        self.original_agent = copy.deepcopy(self.agent)
 
         # TODO: Implement scheduler
+
+        # Tensorboard logging
+        self.writer = SummaryWriter()
+        self.policy_updates = 0
 
     def save(self):
         """
@@ -99,9 +107,7 @@ class PPG:
         th.save(self.agent.policy.state_dict(), self.out_weights)
         print(f"Saved model weights to {self.out_weights}")
 
-    def collect_episodes(
-        self, memories, num_episodes_to_collect, max_timesteps, env
-    ):
+    def collect_episodes(self, memories, num_episodes_to_collect, env):
         inital_hidden_states = {"agent": [], "critic": []}
         for _ in range(num_episodes_to_collect):
             episode = []
@@ -115,7 +121,8 @@ class PPG:
             inital_hidden_states["agent"].append(agent_hidden_state)
             inital_hidden_states["critic"].append(critic_hidden_state)
 
-            for timestep in range(max_timesteps):
+            done = False
+            while not done:
                 # Preprocess the observation
                 agent_obs = self.agent._env_obs_to_agent(obs)
 
@@ -132,14 +139,19 @@ class PPG:
                 # Take the action in the environment
                 minerl_action = self.agent._agent_action_to_env(action)
                 minerl_action["ESC"] = 0
-                next_obs, _, done, _ = env.step(minerl_action)
+                next_obs, _, next_done, _ = env.step(minerl_action)
 
-                # convert to NCHW
-                input_tensor = agent_obs["img"].permute(0, 3, 1, 2)
+                # Preprocess the next observation for the reward predictor
+                image = resize_image(obs["pov"], (256, 256))[
+                    None
+                ]  # 128x128 is to small for comparison for humans, 256x256 is better
+                input_tensor = (
+                    th.from_numpy(image).to(self.device).permute(0, 3, 1, 2)
+                )
                 # Predict the reward for the observation
                 reward = self.reward_predictor.reward(input_tensor)
 
-                if done or timestep == max_timesteps - 1:
+                if next_done:
                     # Compute the value for the next observation
                     next_value, _ = self.critic.policy.v(
                         self.agent._env_obs_to_agent(next_obs),
@@ -150,10 +162,11 @@ class PPG:
                     # Add the next_value to the last memory of the episode
                     memory = Memory(
                         agent_obs,
+                        obs["pov"],
                         action,
                         result["log_prob"],
                         reward,
-                        done,
+                        next_done,
                         value,
                         next_value,
                     )
@@ -163,10 +176,11 @@ class PPG:
 
                 memory = Memory(
                     agent_obs,
+                    obs["pov"],
                     action,
                     result["log_prob"],
                     reward,
-                    done,
+                    next_done,
                     value,
                     None,
                 )
@@ -177,38 +191,70 @@ class PPG:
                 agent_hidden_state = new_agent_state
                 critic_hidden_state = new_critic_state
                 obs = next_obs
+                done = next_done
             memories.append(episode)
+        print(
+            f"[INFO] Finished collecting episodes | memories: {len(memories)}"
+        )
         return inital_hidden_states
+
+    def pretrain_reward_predictor(
+        self, n_iterations, segment_length, n_rollouts
+    ):
+        env = gym.make(self.env_name)
+        memories: Deque[Episode] = deque([])
+        for eps in tqdm(range(n_iterations), desc="pretrain reward predictor"):
+            _ = self.collect_episodes(memories, n_rollouts, env)
+            while memories:
+                episode = memories.popleft()
+                segments = create_fixed_length_segments(
+                    [mem.obs for mem in episode],
+                    [mem.reward for mem in episode],
+                    segment_length,
+                )
+                self.preference_interface.add_segments(segments)
+            self.preference_interface.get_preferences()
+            self.reward_predictor.train()
+            memories.clear()
+        print("Pretraining reward predictor done!")
+        self.reward_predictor.save()
 
     def train(
         self,
         n_iterations,
-        max_timesteps,
-        render,
-        render_every_eps,
         save_every,
-        num_policy_updates_per_preference_update,
-        num_policy_updates_per_aux,
+        n_wake_cycle_per_preference_update,
+        n_wake_cycle_per_aux_update,
+        segment_length,
         n_rollouts,
+        n_pairs=10,
     ):
         env = gym.make(self.env_name)
 
         memories: Deque[Episode] = deque([])
         aux_memories = deque([])
-        num_policy_updates = 0
+        n_wake_phases = 0
 
         for eps in tqdm(range(n_iterations), desc="iterations"):
-            render_eps = render and eps % render_every_eps == 0
-
             initial_hidden_states = self.collect_episodes(
-                memories, n_rollouts, max_timesteps, env
+                memories, n_rollouts, env
             )
 
-            # Perform learning for each episode's memories
+            # Wake phase (policy/ppo phase)
             episode_id = 0
             while memories:
                 # Get the episode
                 episode = memories.popleft()
+
+                # Split the episode into fixed-length segments
+                segments = create_fixed_length_segments(
+                    [memory.obs for memory in episode],
+                    [memory.reward for memory in episode],
+                    segment_length,
+                )
+
+                # Add the segments to the preference interface
+                self.preference_interface.add_segments(segments)
 
                 self.learn(
                     episode,
@@ -217,46 +263,19 @@ class PPG:
                     episode_id,
                 )
 
-                num_policy_updates += 1
-
-                # Prepare segments from the episode
-                rewards = [memory.reward for memory in episode]
-                frames = [memory.agent_obs["img"] for memory in episode]
-
-                # Convert frames to numpy and rewards to scalar values
-                frames = [frame.cpu().numpy() for frame in frames]
-                rewards = [reward for reward in rewards]
-
-                # Split the episode into fixed-length segments
-                segment_length = 100
-                segments = create_fixed_length_segments(
-                    frames, rewards, segment_length
-                )
-                # Add the segments to the preference interface
-                self.preference_interface.add_segments(segments)
-
-                if (
-                    num_policy_updates
-                    % num_policy_updates_per_preference_update
-                    == 0
-                ):
-                    # ask user for preferences on seqments
-                    self.preference_interface.get_preferences()
-                    # update reward predictor with new preferences
-                    self.reward_predictor.train()
-
                 episode_id += 1
+            n_wake_phases += 1
 
-                # Perform auxiliary learning if required
-                if num_policy_updates % num_policy_updates_per_aux == 0:
-                    self.learn_aux(aux_memories)
-                    aux_memories.clear()
+            # Preference phase
+            if n_wake_phases % n_wake_cycle_per_preference_update == 0:
+                self.preference_interface.get_preferences(n_pairs=n_pairs)
+                # update reward predictor with new preferences
+                self.reward_predictor.train()
 
-            if render_eps:
-                env.close()
-
-            if eps % save_every == 0:
-                self.save()
+            # Sleep phase (auxiliary phase)
+            if n_wake_phases % n_wake_cycle_per_aux_update == 0:
+                self.learn_aux(aux_memories, initial_hidden_states)
+                aux_memories.clear()
 
     def learn(self, episode, aux_memories, initial_hidden_states, episode_id):
         # prepare the memories
@@ -306,7 +325,7 @@ class PPG:
                 old_log_probs_batch,
                 rewards_batch,
                 old_values_batch,
-            ) in dl:
+            ) in tqdm(dl, desc="Policy phase training"):
                 log_probs = []
                 values = []
                 kl_divs = []
@@ -383,7 +402,6 @@ class PPG:
                 # Stack the values and log_probs
                 values = th.stack(values).to(self.device)
                 log_probs = th.stack(log_probs).to(self.device)
-                # TODO: use kl_divs and check if it is needed/correct
                 kl_divs = th.stack(kl_divs).to(self.device)
 
                 # Calculate entropy
@@ -400,8 +418,8 @@ class PPG:
 
                 policy_loss = (
                     -th.min(surr1, surr2) - self.beta_s * entropy
-                )  # - self.kl_beta * kl_divs
-                batch_policy_loss = policy_loss.mean().item()
+                ) - self.kl_beta * kl_divs
+
                 update_network_(
                     policy_loss,
                     self.agent_optim,
@@ -415,7 +433,6 @@ class PPG:
                     old_values_batch,
                     self.value_clip,
                 )
-                batch_value_loss = value_loss.mean().item()
 
                 update_network_(
                     value_loss,
@@ -424,40 +441,180 @@ class PPG:
                     self.max_grad_norm,
                 )
 
-                print(
-                    f"Policy loss: {batch_policy_loss}, Value loss: {batch_value_loss}"
+                # # Tensorboard logging
+                # self.writer.add_scalar(
+                #     "Wake Loss/Policy",
+                #     policy_loss.mean().item(),
+                #     self.policy_updates,
+                # )
+                # self.writer.add_scalar(
+                #     "Wake Loss/Value",
+                #     value_loss.mean().item(),
+                #     self.policy_updates,
+                # )
+
+                self.policy_updates += 1
+
+    def learn_aux(self, aux_memories, initial_hidden_states):
+        print("Learning from aux")
+
+        # Save the original policy before updating it
+        original_policy = self.agent.policy
+
+        dummy_first = th.from_numpy(np.array((False,))).to(self.device)
+
+        for epoch in range(self.epochs_aux):
+            for episode_id, aux in enumerate(aux_memories):
+                # Create the dataloader for the episode
+                aux_dl = create_dataloader(
+                    [aux.agent_obs, aux.rewards, aux.old_values],
+                    batch_size=self.minibatch_size,
                 )
 
-    def learn_aux(self, aux_memories):
-        # Gather states and target values into one tensor
-        agent_observations = [aux.agent_obs for aux in aux_memories]
-        rewards = [aux.rewards for aux in aux_memories]
-        old_values = [aux.old_values for aux in aux_memories]
+                for obs, rewards, old_values in tqdm(
+                    aux_dl, desc=f"Auxiliary epoch {epoch}"
+                ):
+                    agent_hidden_states = initial_hidden_states["agent"][
+                        episode_id
+                    ]
+                    critic_hidden_state = initial_hidden_states["critic"][
+                        episode_id
+                    ]
+                    policy_values = []
+                    values = []
+                    kl_divs = []
 
-        agent_observations = th.cat(agent_observations)
-        rewards = th.cat(rewards)
-        old_values = th.cat(old_values)
+                    # Unstack the agent_obs_batch and actions_batch
+                    obs_tensors = th.unbind(obs["img"])
 
-        # Get old action predictions for minimizing kl divergence and clipping respectively
+                    # Iterate over the unstacked tensors directly
+                    for obs_tensor in obs_tensors:
+                        obs["img"] = obs_tensor
+                        # Run the agent to get the policy distribution
+                        (
+                            pi_distribution,
+                            policy_value,
+                            next_agent_hidden_state,
+                        ) = self.agent.policy.get_output_for_observation(
+                            obs, agent_hidden_states, dummy_first
+                        )
 
-        # Create the dataloader for auxiliary phase training
+                        with th.no_grad():
+                            (
+                                original_pi_distribution,
+                                _,
+                                _,
+                            ) = original_policy.get_output_for_observation(
+                                obs, agent_hidden_states, dummy_first
+                            )
 
-        # The proposed auxiliary phase training
-        pass
+                        # run the critic to get the value prediction
+                        (
+                            _,
+                            v_prediction,
+                            next_critic_hidden_state,
+                        ) = self.critic.policy.get_output_for_observation(
+                            obs, critic_hidden_state, dummy_first
+                        )
+                        # Calculate KL divergence
+                        kl_div = self.agent.policy.pi_head.kl_divergence(
+                            pi_distribution, original_pi_distribution
+                        )
+
+                        policy_values.append(policy_value)
+                        values.append(v_prediction)
+                        kl_divs.append(kl_div)
+
+                        # Update hidden states for the next iteration
+                        next_agent_hidden_state = tree_map(
+                            lambda x: x.detach(), next_agent_hidden_state
+                        )
+                        next_critic_hidden_state = tree_map(
+                            lambda x: x.detach(), next_critic_hidden_state
+                        )
+                        agent_hidden_states = next_agent_hidden_state
+                        critic_hidden_state = next_critic_hidden_state
+
+                    # Stack the needed tensors
+                    policy_values = th.stack(policy_values).to(self.device)
+                    values = th.stack(values).to(self.device)
+                    kl_divs = th.stack(kl_divs).to(self.device)
+
+                    aux_loss = clipped_value_loss(
+                        policy_values,
+                        rewards,
+                        old_values,
+                        self.value_clip,
+                    )
+
+                    # policy loss is aux loss + kl_div_loss
+                    policy_loss = aux_loss - self.kl_beta * kl_divs
+
+                    update_network_(
+                        policy_loss,
+                        self.agent_optim,
+                        self.agent.policy,
+                        self.max_grad_norm,
+                    )
+
+                    value_loss = clipped_value_loss(
+                        values,
+                        rewards,
+                        old_values,
+                        self.value_clip,
+                    )
+
+                    update_network_(
+                        value_loss,
+                        self.critic_optim,
+                        self.critic.policy,
+                        self.max_grad_norm,
+                    )
 
 
-def create_fixed_length_segments(frames, rewards, segment_length):
-    segments = []
-    num_segments = len(frames) // segment_length
+if __name__ == "__main__":
+    VPT_MODEL_PATH = "data/VPT-models/foundation-model-1x.model"
+    VPT_MODEL_WEIGHTS = "train/MineRLBasaltBuildVillageHouse/MineRLBasaltBuildVillageHouse_100000.weights"
+    ENV = "MineRLBasaltBuildVillageHouse-v0"
+    TASK = "Build a house in same style as village"
+    DEVICE = "cuda"
 
-    for i in range(num_segments):
-        segment = Segment()
-        start_index = i * segment_length
-        end_index = start_index + segment_length
+    device = th.device(DEVICE if th.cuda.is_available() else "cpu")
 
-        for j in range(start_index, end_index):
-            segment.add_frame(frames[j], rewards[j])
+    preference_queue = deque([])
+    sequence_queue = []
 
-        segments.append(segment)
+    reward_predictor = RewardPredictorNetwork(pref_queue=preference_queue)
+    pref_interface = PreferenceInterface(sequence_queue, preference_queue, TASK)
 
-    return segments
+    ppg = PPG(
+        ENV,
+        VPT_MODEL_PATH,
+        VPT_MODEL_WEIGHTS,
+        f"train/{ENV}-ppg.weights",
+        device,
+        reward_predictor,
+        pref_interface,
+        epochs=1,
+        epochs_aux=6,
+        minibatch_size=32,
+        max_grad_norm=5,
+        lr=2e-5,
+        betas=(0.9, 0.999),
+        gamma=0.99,
+        lam=0.95,
+        clip=0.2,
+        value_clip=0.2,
+        beta_s=0.01,
+    )
+
+    # ppg.pretrain_reward_predictor(10, 100, 1)
+
+    ppg.train(
+        n_iterations=500000,
+        n_wake_cycle_per_preference_update=1,
+        n_wake_cycle_per_aux_update=1,
+        segment_length=100,  # 3-5 seconds
+        save_every=1000,
+        n_rollouts=1,
+    )

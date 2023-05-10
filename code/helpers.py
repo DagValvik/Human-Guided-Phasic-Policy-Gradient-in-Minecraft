@@ -3,6 +3,7 @@ import pickle
 import gym
 import torch
 from openai_vpt.agent import PI_HEAD_KWARGS, MineRLAgent
+from segment import Segment
 
 
 def load_model_parameters(path_to_model_file):
@@ -73,3 +74,20 @@ def calculate_gae(rewards, values, masks, gamma, lam):
         gae = delta + gamma * lam * masks[step] * gae
         returns.insert(0, gae + values[step])
     return returns
+
+
+def create_fixed_length_segments(frames, rewards, segment_length):
+    segments = []
+    num_segments = len(frames) // segment_length
+
+    for i in range(num_segments):
+        segment = Segment()
+        start_index = i * segment_length
+        end_index = start_index + segment_length
+
+        for j in range(start_index, end_index):
+            segment.add_frame(frames[j], rewards[j])
+
+        segments.append(segment)
+
+    return segments

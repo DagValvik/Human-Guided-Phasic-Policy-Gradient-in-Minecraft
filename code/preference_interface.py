@@ -11,14 +11,14 @@ class PreferenceInterface:
     to choose the preferred one. The user's choice is put in a preference queue.
     """
 
-    def __init__(self, segment_queue: list, pref_queue: deque):
+    def __init__(self, segment_queue: list, pref_queue: deque, task_name: str):
         """
         :param segment_queue: The segment queue to get segments from
         :param pref_queue: The preference queue to put the user's preferences in
         """
         self.segment_queue = segment_queue
         self.pref_queue = pref_queue
-        self.task_name = "MineRLBasaltFindCave-v0"
+        self.task_name = task_name
 
     def shuffle_segment_queue(self):
         """
@@ -41,17 +41,27 @@ class PreferenceInterface:
         """
         self.segment_queue.extend(segments)
 
-    def get_preferences(self):
+    def get_preferences(self, n_pairs: int):
         """
         Get the user's preferences.
         """
+        pairs_shown = 0
         while len(self.segment_queue) > 1:
             # Sample random segments from the list
             s1, s2 = random.sample(self.segment_queue, 2)
+            # Remove the segments from the segment queue
             # Show the user the segment pair
             pref = self.get_user_preference(s1, s2)
-            # Put the user's preference in the preference queue
-            self.pref_queue.append((s1, s2, pref))
+            if pref is not None:
+                self.pref_queue.append((s1, s2, pref))
+            self.segment_queue.remove(s1)
+            self.segment_queue.remove(s2)
+            pairs_shown += 1
+            if pairs_shown >= n_pairs:
+                # If we have shown enough pairs, stop
+                # and clear the segment queue
+                self.segment_queue.clear()
+                break
 
     def show_segment_pair(self, s1, s2):
         """
@@ -63,8 +73,8 @@ class PreferenceInterface:
         # Combine the two segments horizontally
         combined_frames = []
         for f1, f2 in zip(s1.frames, s2.frames):
-            f1 = cv2.cvtColor(np.squeeze(f1), cv2.COLOR_RGB2BGR)
-            f2 = cv2.cvtColor(np.squeeze(f2), cv2.COLOR_RGB2BGR)
+            f1 = cv2.cvtColor(f1, cv2.COLOR_RGB2BGR)
+            f2 = cv2.cvtColor(f2, cv2.COLOR_RGB2BGR)
             combined_frame = np.hstack((f1, f2))
             combined_frames.append(combined_frame)
 
@@ -107,6 +117,6 @@ class PreferenceInterface:
             elif pref == "3":
                 return [0.5, 0.5]  # equal preference
             elif pref == "4":
-                return [-1.0, -1.0]  # incomparable preference
+                return None  # incomparable preference
             else:
                 print("Invalid input. Please enter 1, 2, 3, or 4.")
