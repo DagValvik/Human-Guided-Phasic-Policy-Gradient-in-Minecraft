@@ -47,6 +47,8 @@ class PPG:
         lam,
         clip,
         value_clip,
+        kl_beta,
+        beta_clone,
     ):
         self.epochs = epochs
         self.epochs_aux = epochs_aux
@@ -55,7 +57,7 @@ class PPG:
         self.lr = lr
         self.betas = betas
         self.beta_s = beta_s
-        self.kl_beta = 1.0
+        self.kl_beta = kl_beta
         self.gamma = gamma
         self.lam = lam
         self.clip = clip
@@ -65,6 +67,7 @@ class PPG:
         self.preference_interface = preference_interface
         self.device = device
         self.out_weights = out_weights
+        self.beta_clone = beta_clone
 
         # Load model parameters and create agents
         agent_policy_kwargs, agent_pi_head_kwargs = load_model_parameters(model)
@@ -98,7 +101,8 @@ class PPG:
 
         # Tensorboard logging
         self.writer = SummaryWriter()
-        self.policy_updates = 0
+        self.wake_updates = 0
+        self.sleep_updates = 0
 
     def save(self):
         """
@@ -114,12 +118,17 @@ class PPG:
             obs = env.reset()
             dummy_first = th.from_numpy(np.array((False,))).to(self.device)
             # Reset the hidden state for the policy
-            initial_critic_hidden_state = self.critic.policy.initial_state(1)
-            initial_agent_hidden_state = self.agent.policy.initial_state(1)
-            agent_hidden_state = initial_agent_hidden_state
-            critic_hidden_state = initial_critic_hidden_state
-            inital_hidden_states["agent"].append(agent_hidden_state)
-            inital_hidden_states["critic"].append(critic_hidden_state)
+            # initial_critic_hidden_state = self.critic.policy.initial_state(1)
+            # initial_agent_hidden_state = self.agent.policy.initial_state(1)
+            # Maybe we don't need to worry about hidden state reconstruction
+            # agent_hidden_state = initial_agent_hidden_state
+            # critic_hidden_state = initial_critic_hidden_state
+            # inital_hidden_states["agent"].append(agent_hidden_state)
+            # inital_hidden_states["critic"].append(critic_hidden_state)
+
+            # Dont reconstruct hidden state
+            critic_hidden_state = self.critic.policy.initial_state(1)
+            agent_hidden_state = self.agent.policy.initial_state(1)
 
             done = False
             while not done:
@@ -199,11 +208,11 @@ class PPG:
         return inital_hidden_states
 
     def pretrain_reward_predictor(
-        self, n_iterations, segment_length, n_rollouts
+        self, n_iterations, segment_length, n_rollouts, n_pairs, n_epochs
     ):
         env = gym.make(self.env_name)
         memories: Deque[Episode] = deque([])
-        for eps in tqdm(range(n_iterations), desc="pretrain reward predictor"):
+        for eps in tqdm(range(n_iterations), desc="gather initial preferences"):
             _ = self.collect_episodes(memories, n_rollouts, env)
             while memories:
                 episode = memories.popleft()
@@ -213,11 +222,13 @@ class PPG:
                     segment_length,
                 )
                 self.preference_interface.add_segments(segments)
-            self.preference_interface.get_preferences()
-            self.reward_predictor.train()
-            memories.clear()
-        print("Pretraining reward predictor done!")
-        self.reward_predictor.save()
+            self.preference_interface.get_preferences(n_pairs)
+
+        self.reward_predictor.train(n_epochs)  # Train for 200 epochs
+
+        self.reward_predictor.save(
+            f"train/RewardPredictor_{n_iterations*n_pairs}.pt"
+        )
 
     def train(
         self,
@@ -266,11 +277,14 @@ class PPG:
                 episode_id += 1
             n_wake_phases += 1
 
+            # Clear the memories just to be sure
+            memories.clear()
+
             # Preference phase
             if n_wake_phases % n_wake_cycle_per_preference_update == 0:
                 self.preference_interface.get_preferences(n_pairs=n_pairs)
                 # update reward predictor with new preferences
-                self.reward_predictor.train()
+                self.reward_predictor.train(n_epochs=1)
 
             # Sleep phase (auxiliary phase)
             if n_wake_phases % n_wake_cycle_per_aux_update == 0:
@@ -314,10 +328,15 @@ class PPG:
 
         # Policy phase training (PPO)
         for _ in range(self.epochs):
-            agent_hidden_states = initial_hidden_states["agent"][episode_id]
-            critic_hidden_state = initial_hidden_states["critic"][episode_id]
-
-            dummy_first = th.from_numpy(np.array((False,))).to(self.device)
+            agent_hidden_state = self.agent.policy.initial_state(
+                self.minibatch_size
+            )
+            critic_hidden_state = self.critic.policy.initial_state(
+                self.minibatch_size
+            )
+            orig_hidden_state = self.original_agent.policy.initial_state(
+                self.minibatch_size
+            )
 
             for (
                 agent_obs_batch,
@@ -326,99 +345,81 @@ class PPG:
                 rewards_batch,
                 old_values_batch,
             ) in tqdm(dl, desc="Policy phase training"):
-                log_probs = []
-                values = []
-                kl_divs = []
+                agent_obs_batch = tree_map(
+                    lambda x: x.squeeze(1), agent_obs_batch
+                )
 
-                # Unstack the agent_obs_batch and actions_batch
-                obs_tensors = th.unbind(agent_obs_batch["img"])
-                buttons_tensors = th.unbind(actions_batch["buttons"])
-                camera_tensors = th.unbind(actions_batch["camera"])
+                dummy_firsts = th.from_numpy(
+                    np.full(len(agent_obs_batch["img"]), False)
+                ).to(device)
 
-                # Iterate over the unstacked tensors directly
-                for _, (
-                    obs_tensor,
-                    buttons_tensor,
-                    camera_tensor,
-                ) in enumerate(
-                    zip(obs_tensors, buttons_tensors, camera_tensors)
-                ):
-                    agent_obs_batch["img"] = obs_tensor
-                    actions_batch["buttons"] = buttons_tensor
-                    actions_batch["camera"] = camera_tensor
-                    # Run the agent to get the policy distribution
+                # Run the agent to get the policy distribution
+                (
+                    pi_distribution,
+                    _,
+                    next_agent_hidden_state,
+                ) = self.agent.policy.get_output_for_observation(
+                    agent_obs_batch, agent_hidden_state, dummy_firsts
+                )
+
+                # Run the critic to get the value prediction
+                (
+                    _,
+                    values,
+                    next_critic_hidden_state,
+                ) = self.critic.policy.get_output_for_observation(
+                    agent_obs_batch,
+                    critic_hidden_state,
+                    dummy_firsts,
+                )
+
+                # Calculate the log prob1
+                log_probs = self.agent.policy.get_logprob_of_action(
+                    pi_distribution, actions_batch
+                )
+
+                with th.no_grad():
                     (
-                        pi_distribution,
+                        original_pi_distribution,
                         _,
-                        next_agent_hidden_state,
-                    ) = self.agent.policy.get_output_for_observation(
-                        agent_obs_batch, agent_hidden_states, dummy_first
+                        next_orig_hidden_state,
+                    ) = self.original_agent.policy.get_output_for_observation(
+                        agent_obs_batch, orig_hidden_state, dummy_firsts
                     )
 
-                    # Run the critic to get the value prediction
-                    (
-                        _,
-                        v_prediction,
-                        next_critic_hidden_state,
-                    ) = self.critic.policy.get_output_for_observation(
-                        agent_obs_batch,
-                        critic_hidden_state,
-                        dummy_first,
-                    )
+                # Calculate KL divergence
+                kl_divs = self.agent.policy.pi_head.kl_divergence(
+                    pi_distribution, original_pi_distribution
+                )
 
-                    # Calculate the log prob1
-                    action_log_prob = self.agent.policy.get_logprob_of_action(
-                        pi_distribution, actions_batch
-                    )
-
-                    with th.no_grad():
-                        (
-                            original_pi_distribution,
-                            _,
-                            _,
-                        ) = self.original_agent.policy.get_output_for_observation(
-                            agent_obs_batch, agent_hidden_states, dummy_first
-                        )
-
-                    # Calculate KL divergence
-                    kl_div = self.agent.policy.pi_head.kl_divergence(
-                        pi_distribution, original_pi_distribution
-                    )
-
-                    values.append(v_prediction)
-                    log_probs.append(action_log_prob)
-                    kl_divs.append(kl_div)
-
-                    # Update hidden states for the next iteration
-                    next_agent_hidden_state = tree_map(
-                        lambda x: x.detach(), next_agent_hidden_state
-                    )
-                    next_critic_hidden_state = tree_map(
-                        lambda x: x.detach(), next_critic_hidden_state
-                    )
-                    agent_hidden_states = next_agent_hidden_state
-                    critic_hidden_state = next_critic_hidden_state
-
-                # Stack the values and log_probs
-                values = th.stack(values).to(self.device)
-                log_probs = th.stack(log_probs).to(self.device)
-                kl_divs = th.stack(kl_divs).to(self.device)
+                # Update hidden states for the next iteration
+                agent_hidden_state = tree_map(
+                    lambda x: x.detach(), next_agent_hidden_state
+                )
+                critic_hidden_state = tree_map(
+                    lambda x: x.detach(), next_critic_hidden_state
+                )
+                orig_hidden_state = tree_map(
+                    lambda x: x.detach(), next_orig_hidden_state
+                )
 
                 # Calculate entropy
                 entropy = self.agent.policy.pi_head.entropy(pi_distribution).to(
                     self.device
                 )
 
-                ratios = (log_probs - old_log_probs_batch).exp()
+                ratios = (log_probs - old_log_probs_batch).exp().to(self.device)
                 advantages = normalize(
                     rewards_batch - old_values_batch.detach()
-                )
+                ).to(self.device)
                 surr1 = ratios * advantages
                 surr2 = ratios.clamp(1 - self.clip, 1 + self.clip) * advantages
 
                 policy_loss = (
-                    -th.min(surr1, surr2) - self.beta_s * entropy
-                ) - self.kl_beta * kl_divs
+                    -th.min(surr1, surr2)
+                    - self.beta_s * entropy
+                    - self.kl_beta * kl_divs
+                )
 
                 update_network_(
                     policy_loss,
@@ -441,28 +442,21 @@ class PPG:
                     self.max_grad_norm,
                 )
 
-                # # Tensorboard logging
-                # self.writer.add_scalar(
-                #     "Wake Loss/Policy",
-                #     policy_loss.mean().item(),
-                #     self.policy_updates,
-                # )
-                # self.writer.add_scalar(
-                #     "Wake Loss/Value",
-                #     value_loss.mean().item(),
-                #     self.policy_updates,
-                # )
+                # Tensorboard logging
+                self.writer.add_scalar(
+                    "Wake Loss/Policy",
+                    policy_loss.mean().item(),
+                    self.wake_updates,
+                )
+                self.writer.add_scalar(
+                    "Wake Loss/Value",
+                    value_loss.mean().item(),
+                    self.wake_updates,
+                )
 
-                self.policy_updates += 1
+                self.wake_updates += 1
 
     def learn_aux(self, aux_memories, initial_hidden_states):
-        print("Learning from aux")
-
-        # Save the original policy before updating it
-        original_policy = self.agent.policy
-
-        dummy_first = th.from_numpy(np.array((False,))).to(self.device)
-
         for epoch in range(self.epochs_aux):
             for episode_id, aux in enumerate(aux_memories):
                 # Create the dataloader for the episode
@@ -471,74 +465,135 @@ class PPG:
                     batch_size=self.minibatch_size,
                 )
 
-                for obs, rewards, old_values in tqdm(
+                agent_hidden_state = self.agent.policy.initial_state(
+                    self.minibatch_size
+                )
+                critic_hidden_state = self.critic.policy.initial_state(
+                    self.minibatch_size
+                )
+                orig_hidden_state = self.original_agent.policy.initial_state(
+                    self.minibatch_size
+                )
+
+                for agent_obs, rewards, old_values in tqdm(
                     aux_dl, desc=f"Auxiliary epoch {epoch}"
                 ):
-                    agent_hidden_states = initial_hidden_states["agent"][
-                        episode_id
-                    ]
-                    critic_hidden_state = initial_hidden_states["critic"][
-                        episode_id
-                    ]
-                    policy_values = []
-                    values = []
-                    kl_divs = []
+                    # agent_hidden_states = initial_hidden_states["agent"][
+                    #     episode_id
+                    # ]
+                    # critic_hidden_state = initial_hidden_states["critic"][
+                    #     episode_id
+                    # ]
+                    # policy_values = []
+                    # values = []
+                    # kl_divs = []
 
-                    # Unstack the agent_obs_batch and actions_batch
-                    obs_tensors = th.unbind(obs["img"])
+                    # # Unstack the agent_obs_batch and actions_batch
+                    # obs_tensors = th.unbind(obs["img"])
 
-                    # Iterate over the unstacked tensors directly
-                    for obs_tensor in obs_tensors:
-                        obs["img"] = obs_tensor
-                        # Run the agent to get the policy distribution
+                    # # Iterate over the unstacked tensors directly
+                    # for obs_tensor in obs_tensors:
+                    #     obs["img"] = obs_tensor
+                    #     # Run the agent to get the policy distribution
+                    #     (
+                    #         pi_distribution,
+                    #         policy_value,
+                    #         next_agent_hidden_state,
+                    #     ) = self.agent.policy.get_output_for_observation(
+                    #         obs, agent_hidden_states, dummy_first
+                    #     )
+
+                    #     with th.no_grad():
+                    #         (
+                    #             original_pi_distribution,
+                    #             _,
+                    #             _,
+                    #         ) = self.original_agent.policy.get_output_for_observation(
+                    #             obs, agent_hidden_states, dummy_first
+                    #         )
+
+                    #     # run the critic to get the value prediction
+                    #     (
+                    #         _,
+                    #         v_prediction,
+                    #         next_critic_hidden_state,
+                    #     ) = self.critic.policy.get_output_for_observation(
+                    #         obs, critic_hidden_state, dummy_first
+                    #     )
+                    #     # Calculate KL divergence
+                    #     kl_div = self.agent.policy.pi_head.kl_divergence(
+                    #         pi_distribution, original_pi_distribution
+                    #     )
+
+                    #     policy_values.append(policy_value)
+                    #     values.append(v_prediction)
+                    #     kl_divs.append(kl_div)
+
+                    #     # Update hidden states for the next iteration
+                    #     next_agent_hidden_state = tree_map(
+                    #         lambda x: x.detach(), next_agent_hidden_state
+                    #     )
+                    #     next_critic_hidden_state = tree_map(
+                    #         lambda x: x.detach(), next_critic_hidden_state
+                    #     )
+                    #     agent_hidden_states = next_agent_hidden_state
+                    #     critic_hidden_state = next_critic_hidden_state
+
+                    # # Stack the needed tensors
+                    # policy_values = th.stack(policy_values).to(self.device)
+                    # values = th.stack(values).to(self.device)
+                    # kl_divs = th.stack(kl_divs).to(self.device)
+
+                    agent_obs = tree_map(lambda x: x.squeeze(1), agent_obs)
+
+                    dummy_firsts = th.from_numpy(
+                        np.full(len(agent_obs["img"]), False)
+                    ).to(device)
+
+                    # Run the agent to get the policy distribution
+                    (
+                        pi_distribution,
+                        policy_values,
+                        next_agent_hidden_state,
+                    ) = self.agent.policy.get_output_for_observation(
+                        agent_obs, agent_hidden_state, dummy_firsts
+                    )
+
+                    # Run the critic to get the value prediction
+                    (
+                        _,
+                        values,
+                        next_critic_hidden_state,
+                    ) = self.critic.policy.get_output_for_observation(
+                        agent_obs,
+                        critic_hidden_state,
+                        dummy_firsts,
+                    )
+
+                    with th.no_grad():
                         (
-                            pi_distribution,
-                            policy_value,
-                            next_agent_hidden_state,
-                        ) = self.agent.policy.get_output_for_observation(
-                            obs, agent_hidden_states, dummy_first
-                        )
-
-                        with th.no_grad():
-                            (
-                                original_pi_distribution,
-                                _,
-                                _,
-                            ) = original_policy.get_output_for_observation(
-                                obs, agent_hidden_states, dummy_first
-                            )
-
-                        # run the critic to get the value prediction
-                        (
+                            original_pi_distribution,
                             _,
-                            v_prediction,
-                            next_critic_hidden_state,
-                        ) = self.critic.policy.get_output_for_observation(
-                            obs, critic_hidden_state, dummy_first
-                        )
-                        # Calculate KL divergence
-                        kl_div = self.agent.policy.pi_head.kl_divergence(
-                            pi_distribution, original_pi_distribution
+                            next_orig_hidden_state,
+                        ) = self.original_agent.policy.get_output_for_observation(
+                            agent_obs, orig_hidden_state, dummy_firsts
                         )
 
-                        policy_values.append(policy_value)
-                        values.append(v_prediction)
-                        kl_divs.append(kl_div)
+                    # Calculate KL divergence
+                    kl_div = self.agent.policy.pi_head.kl_divergence(
+                        pi_distribution, original_pi_distribution
+                    )
 
-                        # Update hidden states for the next iteration
-                        next_agent_hidden_state = tree_map(
-                            lambda x: x.detach(), next_agent_hidden_state
-                        )
-                        next_critic_hidden_state = tree_map(
-                            lambda x: x.detach(), next_critic_hidden_state
-                        )
-                        agent_hidden_states = next_agent_hidden_state
-                        critic_hidden_state = next_critic_hidden_state
-
-                    # Stack the needed tensors
-                    policy_values = th.stack(policy_values).to(self.device)
-                    values = th.stack(values).to(self.device)
-                    kl_divs = th.stack(kl_divs).to(self.device)
+                    # Update hidden states for the next iteration
+                    agent_hidden_state = tree_map(
+                        lambda x: x.detach(), next_agent_hidden_state
+                    )
+                    critic_hidden_state = tree_map(
+                        lambda x: x.detach(), next_critic_hidden_state
+                    )
+                    orig_hidden_state = tree_map(
+                        lambda x: x.detach(), next_orig_hidden_state
+                    )
 
                     aux_loss = clipped_value_loss(
                         policy_values,
@@ -548,7 +603,7 @@ class PPG:
                     )
 
                     # policy loss is aux loss + kl_div_loss
-                    policy_loss = aux_loss - self.kl_beta * kl_divs
+                    policy_loss = aux_loss - self.beta_clone * kl_div
 
                     update_network_(
                         policy_loss,
@@ -571,10 +626,27 @@ class PPG:
                         self.max_grad_norm,
                     )
 
+                    # Tensorboard logging
+                    self.writer.add_scalar(
+                        "Sleep Loss/Value (Joint)",
+                        policy_loss.mean().item(),
+                        self.sleep_updates,
+                    )
+                    self.writer.add_scalar(
+                        "Sleep Loss/Value (Critic)",
+                        value_loss.mean().item(),
+                        self.sleep_updates,
+                    )
+
+                    self.sleep_updates += 1
+
 
 if __name__ == "__main__":
     VPT_MODEL_PATH = "data/VPT-models/foundation-model-1x.model"
     VPT_MODEL_WEIGHTS = "train/MineRLBasaltBuildVillageHouse/MineRLBasaltBuildVillageHouse_100000.weights"
+    REWARD_PREDICTOR_PATH = (
+        "train/MineRLBasaltBuildVillageHouse/RewardPredictor_1000.pt"
+    )
     ENV = "MineRLBasaltBuildVillageHouse-v0"
     TASK = "Build a house in same style as village"
     DEVICE = "cuda"
@@ -599,22 +671,38 @@ if __name__ == "__main__":
         epochs_aux=6,
         minibatch_size=32,
         max_grad_norm=5,
-        lr=2e-5,
+        lr=1e-5,
         betas=(0.9, 0.999),
         gamma=0.99,
         lam=0.95,
         clip=0.2,
         value_clip=0.2,
         beta_s=0.01,
+        kl_beta=0.5,
+        beta_clone=1.0,
     )
 
-    # ppg.pretrain_reward_predictor(10, 100, 1)
+    # Comment out if you want to train the reward predictor
+    # ppg.pretrain_reward_predictor(
+    #     # These parameters control how much variation there is in the
+    #     # preferences that are generated for the reward predictor.
+    #     # e.g 10 iterations * 50 pairs = 500 comparisons, with n_rollouts controlling the diversity of the pairs.
+    #     n_iterations=1,
+    #     segment_length=50,
+    #     n_rollouts=1,
+    #     n_pairs=10,
+    #     # Number of epochs to train the reward predictor for
+    #     n_epochs=200,
+    # )
+
+    ppg.reward_predictor.load(REWARD_PREDICTOR_PATH)
 
     ppg.train(
-        n_iterations=500000,
+        n_iterations=100,
         n_wake_cycle_per_preference_update=1,
         n_wake_cycle_per_aux_update=1,
-        segment_length=100,  # 3-5 seconds
+        segment_length=50,  # 2-3 seconds
         save_every=1000,
         n_rollouts=1,
+        n_pairs=10,
     )

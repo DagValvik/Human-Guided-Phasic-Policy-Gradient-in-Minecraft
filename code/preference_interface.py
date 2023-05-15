@@ -3,6 +3,7 @@ from collections import deque
 
 import cv2
 import numpy as np
+from openai_vpt.agent import resize_image
 
 
 class PreferenceInterface:
@@ -53,6 +54,12 @@ class PreferenceInterface:
             # Show the user the segment pair
             pref = self.get_user_preference(s1, s2)
             if pref is not None:
+                # Rezize the frames to 256x256
+                for i, obs in enumerate(s1.frames):
+                    s1.frames[i] = resize_image(obs, (256, 256))[None]
+                for i, obs in enumerate(s2.frames):
+                    s2.frames[i] = resize_image(obs, (256, 256))[None]
+                # Add the preference to the preference queue
                 self.pref_queue.append((s1, s2, pref))
             self.segment_queue.remove(s1)
             self.segment_queue.remove(s2)

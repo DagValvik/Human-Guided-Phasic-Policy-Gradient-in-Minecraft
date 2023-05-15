@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from segment import Segment
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 
 class RewardPredictorCore(nn.Module):
@@ -71,6 +73,7 @@ class RewardPredictorNetwork(nn.Module):
         self.core = RewardPredictorCore(batchnorm, dropout).to(self.device)
         self.optimizer = optim.Adam(self.core.parameters(), lr=0.001)
         self.pref_queue = pref_queue
+        self.writer = SummaryWriter()
 
     @torch.no_grad()
     def reward(self, obs):
@@ -79,26 +82,38 @@ class RewardPredictorNetwork(nn.Module):
         return r.item()
 
     def train_step(self, s1: Segment, s2: Segment, pref: list):
-        # Sum the rewards for each segment
-        r1sum = sum(s1.rewards)
-        r2sum = sum(s2.rewards)
+        # Convert the frames to tensors
+        s1_frames = torch.stack(
+            [
+                torch.from_numpy(frame).permute(0, 3, 1, 2).squeeze()
+                for frame in s1.frames
+            ]
+        ).to(self.device)
+        s2_frames = torch.stack(
+            [
+                torch.from_numpy(frame).permute(0, 3, 1, 2).squeeze()
+                for frame in s2.frames
+            ]
+        ).to(self.device)
+
+        # Calculate the reward for each segment
+        r1 = self.core(s1_frames)
+        r2 = self.core(s2_frames)
+
+        # Calculate the sum of rewards for each segment
+        r1sum = torch.sum(r1)
+        r2sum = torch.sum(r2)
 
         # Calculate the probability that segment 1 is preferred over segment 2
         # by comparing the sum of rewards
-        p1 = torch.exp(torch.tensor(r1sum, requires_grad=True)) / (
-            torch.exp(torch.tensor(r1sum, requires_grad=True))
-            + torch.exp(torch.tensor(r2sum, requires_grad=True))
-        )
-        p2 = torch.exp(torch.tensor(r2sum, requires_grad=True)) / (
-            torch.exp(torch.tensor(r1sum, requires_grad=True))
-            + torch.exp(torch.tensor(r2sum, requires_grad=True))
-        )
+        p1 = torch.exp(r1sum) / (torch.exp(r1sum) + torch.exp(r2sum))
+        p2 = torch.exp(r2sum) / (torch.exp(r1sum) + torch.exp(r2sum))
 
         # Calculate the loss
-        loss = -(
-            torch.tensor(pref[0], requires_grad=True) * torch.log(p1)
-            + torch.tensor(pref[1], requires_grad=True) * torch.log(p2)
-        )
+        pref_t = torch.tensor(
+            pref, dtype=torch.float32, device=self.device
+        )  # assuming pref is a list of floats
+        loss = -(pref_t[0] * torch.log(p1) + pref_t[1] * torch.log(p2))
 
         # Backpropagate
         self.optimizer.zero_grad()
@@ -106,20 +121,23 @@ class RewardPredictorNetwork(nn.Module):
         self.optimizer.step()
         return loss.item()
 
-    def train(self, max_iterations=None):
-        iteration = 0
-        while self.pref_queue:
-            s1, s2, pref = self.pref_queue.pop()
-            loss = self.train_step(s1, s2, pref)
-            print(
-                f"[INFO] Iteration {iteration} | Loss: {loss:.3f} | Pref: {pref}"
-            )
+    def train(self, n_epochs):
+        # Train for the specified number of epochs
+        for epoch in tqdm(range(n_epochs), desc="Reward Predictor Training"):
+            epoch_loss = 0
+            for i, (s1, s2, pref) in enumerate(self.pref_queue):
+                loss = self.train_step(s1, s2, pref)
+                epoch_loss += loss
 
-            # Increment the iteration counter and break if the maximum number of iterations is reached
-            if max_iterations is not None:
-                iteration += 1
-                if iteration >= max_iterations:
-                    break
+            # Print the average loss for the epoch
+            print(f"Epoch {epoch}: {epoch_loss / len(self.pref_queue)}")
+
+            # Log the average loss for the epoch
+            self.writer.add_scalar(
+                "Reward Predictor Loss",
+                epoch_loss / len(self.pref_queue),
+                epoch,
+            )
 
     def save(self, path):
         torch.save(self.core.state_dict(), path)
