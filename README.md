@@ -1,12 +1,17 @@
-# IAI Project Template
+# Human-Guided-Phasic-Policy-Gradient-in-Minecraft
 
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
+## Installation
 
-This repository serves as a template for software projects.
+To run this project, you need to install the following dependencies:
 
-# Testing and GitHub actions
+- Pre-requirements for [MineRL](https://minerl.readthedocs.io/en/v1.0.0/tutorials/index.html)
+- Anaconda/Miniconda
 
-Using `pre-commit` hooks, `flake8`, `black` and `pytest` are locally run on every commit. For more details on how to use `pre-commit` hooks see [here](https://github.com/iai-group/guidelines/tree/main/python#install-pre-commit-hooks).
+Once you have the dependencies installed, create the environment using the provided `environment.yml` file:
 
-Similarly, Github actions are used to run `flake8`, `black` and `pytest` on every push and pull request. The `pytest` results are sent to [CodeCov](https://about.codecov.io/) using their API for to get test coverage analysis. Details on Github actions are [here](https://github.com/iai-group/guidelines/blob/main/github/Actions.md).
+```bash
+conda env create -f environment.yml
+```
 
+## Downloading Model Files and Weights
+Before running the code, you need to download the foundation model files and weights from [GitHub](https://github.com/openai/Video-Pre-Training/tree/main). Additionally, you will also need to download the index files for the BASALT Dataset.
